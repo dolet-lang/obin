@@ -255,6 +255,34 @@ fun obin_run(options: ObinOptions) -> i32:
     project: ObinProject = obin_require_project(options.manifest)
     return obin_run_in_directory(command, project.root)
 
+fun obin_copy_packaged_assets_tree(source: str, destination: str, strip_cooked_sources: i32) -> i32:
+    if PathOps.exists(source) == 0:
+        return 0
+    if obin_is_directory(source) == 0:
+        if strip_cooked_sources == 1:
+            lower: str = Str.to_lower(source)
+            if Str.ends_with(lower, ".png"):
+                cooked: str = obin_frog_texture_output(source)
+                if obin_frog_texture_header_valid(cooked) == 1:
+                    return 1
+        directory: str = PathOps.get_directory(destination)
+        if obin_ensure_directory(directory) == 0:
+            return 0
+        return CopyFileA(source, destination, 0)
+    if obin_is_reparse_point(source) == 1:
+        return 0
+    if obin_ensure_directory(destination) == 0:
+        return 0
+    names: list<str> = Dir.list(source)
+    index: i64 = 0
+    while index < names.size():
+        source_child: str = PathOps.join_path(source, names.get_str(index))
+        destination_child: str = PathOps.join_path(destination, names.get_str(index))
+        if obin_copy_packaged_assets_tree(source_child, destination_child, strip_cooked_sources) == 0:
+            return 0
+        index = index + 1
+    return 1
+
 fun obin_copy_assets(project: ObinProject, document: ObinToml, stage: str) -> i32:
     roots: list<str> = obin_toml_array(document, "assets.roots")
     if roots.size() == 0:
@@ -268,6 +296,9 @@ fun obin_copy_assets(project: ObinProject, document: ObinToml, stage: str) -> i3
     if obin_path_is_inside(destination_root, stage) == 0:
         print("obin: assets.destination must resolve inside the package stage")
         return 1
+    strip_cooked_sources: i32 = 0
+    if project.frog_enabled == 1 and project.frog_cook_textures == 1 and project.frog_keep_source_textures == 0:
+        strip_cooked_sources = 1
     index: i64 = 0
     while index < roots.size():
         configured: str = roots.get_str(index)
@@ -281,7 +312,7 @@ fun obin_copy_assets(project: ObinProject, document: ObinToml, stage: str) -> i3
         destination: str = destination_root
         if roots.size() > 1:
             destination = PathOps.join_path(destination_root, PathOps.get_filename(source))
-        if obin_copy_tree(source, destination) == 0:
+        if obin_copy_packaged_assets_tree(source, destination, strip_cooked_sources) == 0:
             print(@"obin: failed to copy assets from {source}")
             return 1
         index = index + 1

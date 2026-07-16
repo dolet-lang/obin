@@ -64,6 +64,10 @@ destination = "assets"
 [tool.frog]
 enabled = true
 cook-models = true
+cook-textures = true
+texture-roots = ["assets/textures"]
+texture-excludes = ["@channels="]
+# keep-source-textures = true # optional PNG fallback inside release packages
 lods = [0.45, 0.22]
 # cooker = "tools/custom-frog-cooker.exe"
 
@@ -92,6 +96,12 @@ as supported and avoids rerunning DOPM until the dependency declaration changes.
 - `obin doctor [manifest]`
 
 `clean` is restricted to paths inside the project root. The Frog adapter builds
-the pure-Dolet cooker into `.obin/tools`, discovers referenced `.gltf` files,
-checks source buffers and cooker timestamps, and cooks only stale assets.
-
+the pure-Dolet cooker into `.obin/tools`, discovers referenced `.gltf`, `.glb`,
+and `.png` files, checks source inputs, cooker protocol, format versions, and
+timestamps, and cooks only stale assets. Static PNG literals are discovered by
+default. `texture-roots` adds dynamically selected texture directories;
+`texture-excludes` skips matching paths. Set `cook-literal-textures = false` to
+cook only explicit texture roots. Frog prefers adjacent `.frogmodel` and
+`.frogtex` files at runtime and retains source-file fallbacks for development.
+Release packages omit a PNG only when its adjacent `.frogtex` passes format
+validation; set `keep-source-textures = true` to ship both copies.

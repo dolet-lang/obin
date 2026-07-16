@@ -6,12 +6,25 @@ import json
 
 imm OBIN_FROG_MODEL_MAGIC: i32 = 0x4D475246
 imm OBIN_FROG_MODEL_VERSION: i32 = 2
+imm OBIN_FROG_TEXTURE_MAGIC: i32 = 0x58455446
+imm OBIN_FROG_TEXTURE_VERSION: i32 = 1
+imm OBIN_FROG_COOKER_PROTOCOL: i32 = 2
 
 fun obin_frog_model_output(source: str) -> str:
     length: i64 = Memory.strlen(source)
-    if length >= 5:
+    lower: str = Str.to_lower(source)
+    if length >= 5 and Str.ends_with(lower, ".gltf"):
         return Str.concat(Str.substring(source, 0, length - 5), ".frogmodel")
+    if length >= 4 and Str.ends_with(lower, ".glb"):
+        return Str.concat(Str.substring(source, 0, length - 4), ".frogmodel")
     return Str.concat(source, ".frogmodel")
+
+fun obin_frog_texture_output(source: str) -> str:
+    length: i64 = Memory.strlen(source)
+    lower: str = Str.to_lower(source)
+    if length >= 4 and Str.ends_with(lower, ".png"):
+        return Str.concat(Str.substring(source, 0, length - 4), ".frogtex")
+    return Str.concat(source, ".frogtex")
 
 fun obin_frog_header_valid(path: str) -> i32:
     file: File = File.open_cwd(path, "r")
@@ -27,6 +40,30 @@ fun obin_frog_header_valid(path: str) -> i32:
     if count == 8:
         if Memory.read_i32(header) == OBIN_FROG_MODEL_MAGIC:
             if Memory.read_i32(header + 4) == OBIN_FROG_MODEL_VERSION:
+                valid = 1
+    Memory.free(header)
+    return valid
+
+fun obin_frog_texture_header_valid(path: str) -> i32:
+    if PathOps.exists(path) == 0:
+        return 0
+    file: File = File.open_cwd(path, "r")
+    if file.is_valid() == false:
+        return 0
+    if file.get_size() < 32:
+        file.close()
+        return 0
+    header: i64 = Memory.malloc_zeroed(32)
+    count: i32 = file.read_bytes(header, 32)
+    file.close()
+    valid: i32 = 0
+    if count == 32:
+        width: i32 = Memory.read_i32(header + 8)
+        height: i32 = Memory.read_i32(header + 12)
+        data_size: i64 = Memory.read_i32(header + 28) as i64
+        expected: i64 = (width as i64) * (height as i64) * 4
+        if Memory.read_i32(header) == OBIN_FROG_TEXTURE_MAGIC and Memory.read_i32(header + 4) == OBIN_FROG_TEXTURE_VERSION:
+            if width > 0 and height > 0 and data_size == expected:
                 valid = 1
     Memory.free(header)
     return valid
@@ -60,6 +97,11 @@ fun obin_frog_ensure_cooker(project: ObinProject, doletc: str) -> str:
     rebuild: i32 = 0
     if PathOps.exists(cooker) == 0 or obin_file_stamp(source) > obin_file_stamp(cooker) or obin_file_stamp(doletc) > obin_file_stamp(cooker):
         rebuild = 1
+    if rebuild == 0:
+        protocol_command: str = Str.concat(obin_quote(cooker), " --protocol")
+        protocol_output: str = Command.capture(protocol_command)
+        if Str.parse_i32(protocol_output) != OBIN_FROG_COOKER_PROTOCOL:
+            rebuild = 1
     if rebuild == 1:
         print("[obin:frog] building the cooker from Dolet source")
         command: str = Str.concat(obin_quote(doletc), Str.concat(" ", Str.concat(obin_quote(source), Str.concat(" -o ", Str.concat(obin_quote(cooker), " -O3 --target windows")))))
@@ -109,7 +151,7 @@ fun obin_frog_resolve_model(reference: str, source_file: str, project: ObinProje
         index = index + 1
     return ""
 
-fun obin_frog_collect_literals(source: str, source_file: str, project: ObinProject, roots: list<str>, models: list<str>):
+fun obin_frog_collect_literals(source: str, source_file: str, project: ObinProject, roots: list<str>, models: list<str>, textures: list<str>):
     length: i64 = Memory.strlen(source)
     cursor: i64 = 0
     while cursor < length:
@@ -129,16 +171,26 @@ fun obin_frog_collect_literals(source: str, source_file: str, project: ObinProje
             if cursor < length:
                 literal: str = Str.substring(source, start, cursor)
                 lower: str = Str.to_lower(literal)
-                if Str.ends_with(lower, ".gltf") and Str.ends_with(lower, ".frog.gltf") == false:
+                supported: i32 = 0
+                if Str.ends_with(lower, ".glb"):
+                    supported = 1
+                elif Str.ends_with(lower, ".gltf") and Str.ends_with(lower, ".frog.gltf") == false:
+                    supported = 1
+                if supported == 1:
                     resolved: str = obin_frog_resolve_model(literal, source_file, project, roots)
                     if Memory.strlen(resolved) > 0:
                         obin_add_unique(models, resolved)
+                elif Str.ends_with(lower, ".png"):
+                    resolved_texture: str = obin_frog_resolve_model(literal, source_file, project, roots)
+                    if Memory.strlen(resolved_texture) > 0:
+                        obin_add_unique(textures, resolved_texture)
         cursor = cursor + 1
 
 fun obin_frog_discover_models(project: ObinProject, document: ObinToml) -> list<str>:
     files: list<str> = []
     roots: list<str> = []
     models: list<str> = []
+    textures: list<str> = []
     entry: str = obin_project_entry(project)
     source_root: str = PathOps.get_directory(entry)
     obin_collect_files(source_root, ".dlt", files, 0)
@@ -166,9 +218,60 @@ fun obin_frog_discover_models(project: ObinProject, document: ObinToml) -> list<
         if file.is_valid():
             source: str = file.read_text()
             file.close()
-            obin_frog_collect_literals(source, source_file, project, roots, models)
+            obin_frog_collect_literals(source, source_file, project, roots, models, textures)
         file_index = file_index + 1
     return models
+
+fun obin_frog_discover_textures(project: ObinProject, document: ObinToml) -> list<str>:
+    files: list<str> = []
+    roots: list<str> = []
+    models: list<str> = []
+    textures: list<str> = []
+    entry: str = obin_project_entry(project)
+    source_root: str = PathOps.get_directory(entry)
+    obin_collect_files(source_root, ".dlt", files, 0)
+    obin_frog_add_root(roots, project, "assets")
+    obin_frog_add_root(roots, project, "src\assets")
+    configured_roots: list<str> = obin_toml_array(document, "assets.roots")
+    root_index: i64 = 0
+    while root_index < configured_roots.size():
+        obin_frog_add_root(roots, project, configured_roots.get_str(root_index))
+        root_index = root_index + 1
+    if project.frog_cook_literal_textures == 1:
+        file_index: i64 = 0
+        while file_index < files.size():
+            source_file: str = files.get_str(file_index)
+            file: File = File.open_cwd(source_file, "r")
+            if file.is_valid():
+                source: str = file.read_text()
+                file.close()
+                obin_frog_collect_literals(source, source_file, project, roots, models, textures)
+            file_index = file_index + 1
+    texture_roots: list<str> = obin_toml_array(document, "tool.frog.texture-roots")
+    texture_root_index: i64 = 0
+    while texture_root_index < texture_roots.size():
+        texture_root: str = obin_resolve_from(project.root, texture_roots.get_str(texture_root_index))
+        obin_collect_files(texture_root, ".png", textures, 0)
+        texture_root_index = texture_root_index + 1
+    excludes: list<str> = obin_toml_array(document, "tool.frog.texture-excludes")
+    if excludes.size() == 0:
+        return textures
+    filtered: list<str> = []
+    texture_index: i64 = 0
+    while texture_index < textures.size():
+        texture: str = textures.get_str(texture_index)
+        texture_lower: str = Str.to_lower(texture)
+        excluded: i32 = 0
+        exclude_index: i64 = 0
+        while exclude_index < excludes.size():
+            pattern_lower: str = Str.to_lower(excludes.get_str(exclude_index))
+            if Memory.strlen(pattern_lower) > 0 and Str.contains(texture_lower, pattern_lower):
+                excluded = 1
+            exclude_index = exclude_index + 1
+        if excluded == 0:
+            obin_add_unique(filtered, texture)
+        texture_index = texture_index + 1
+    return filtered
 
 fun obin_frog_model_stale(source: str, output: str, cooker: str, force: i32) -> i32:
     if force == 1:
@@ -180,6 +283,10 @@ fun obin_frog_model_stale(source: str, output: str, cooker: str, force: i32) -> 
     output_stamp: i64 = obin_file_stamp(output)
     if obin_file_stamp(source) > output_stamp or obin_file_stamp(cooker) > output_stamp:
         return 1
+    source_lower: str = Str.to_lower(source)
+    if Str.ends_with(source_lower, ".glb"):
+        # GLB geometry is self-contained in the source file.
+        return 0
     document: JsonDocument = Json.parse_file(source)
     if document.valid() == 0:
         return 1
@@ -195,12 +302,31 @@ fun obin_frog_model_stale(source: str, output: str, cooker: str, force: i32) -> 
         index = index + 1
     return 0
 
+fun obin_frog_texture_stale(source: str, output: str, cooker: str, force: i32) -> i32:
+    if force == 1:
+        return 1
+    if PathOps.exists(output) == 0:
+        return 1
+    if obin_frog_texture_header_valid(output) == 0:
+        return 1
+    output_stamp: i64 = obin_file_stamp(output)
+    if obin_file_stamp(source) > output_stamp or obin_file_stamp(cooker) > output_stamp:
+        return 1
+    return 0
+
 fun obin_frog_cook(project: ObinProject, document: ObinToml, doletc: str, force: i32) -> i32:
-    if project.frog_enabled == 0 or project.frog_cook_models == 0:
+    if project.frog_enabled == 0:
         return 0
-    models: list<str> = obin_frog_discover_models(project, document)
-    if models.size() == 0:
-        print("[obin:frog] models: no referenced glTF assets")
+    if project.frog_cook_models == 0 and project.frog_cook_textures == 0:
+        return 0
+    models: list<str> = []
+    textures: list<str> = []
+    if project.frog_cook_models == 1:
+        models = obin_frog_discover_models(project, document)
+    if project.frog_cook_textures == 1:
+        textures = obin_frog_discover_textures(project, document)
+    if models.size() == 0 and textures.size() == 0:
+        print("[obin:frog] assets: no cookable models or textures")
         return 0
     cooker: str = obin_frog_ensure_cooker(project, doletc)
     if Memory.strlen(cooker) == 0:
@@ -231,4 +357,21 @@ fun obin_frog_cook(project: ObinProject, document: ObinToml, doletc: str, force:
         print(@"[obin:frog] models: {total} up to date")
     else:
         print(@"[obin:frog] models: cooked {cooked}, total {total}")
+    texture_cooked: i32 = 0
+    texture_index: i64 = 0
+    while texture_index < textures.size():
+        texture_source: str = textures.get_str(texture_index)
+        texture_output: str = obin_frog_texture_output(texture_source)
+        if obin_frog_texture_stale(texture_source, texture_output, cooker, force) == 1:
+            print(@"[obin:frog] cooking texture {texture_source}")
+            texture_command: str = Str.concat(obin_quote(cooker), Str.concat(" ", obin_quote(texture_source)))
+            if obin_run_in_directory(texture_command, project.root) != 0:
+                return 1
+            texture_cooked = texture_cooked + 1
+        texture_index = texture_index + 1
+    texture_total: i64 = textures.size()
+    if texture_cooked == 0:
+        print(@"[obin:frog] textures: {texture_total} up to date")
+    else:
+        print(@"[obin:frog] textures: cooked {texture_cooked}, total {texture_total}")
     return 0

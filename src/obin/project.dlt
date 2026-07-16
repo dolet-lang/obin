@@ -21,6 +21,9 @@ struct ObinProject:
     include_assets: i32 = 1
     frog_enabled: i32 = 0
     frog_cook_models: i32 = 1
+    frog_cook_textures: i32 = 1
+    frog_cook_literal_textures: i32 = 1
+    frog_keep_source_textures: i32 = 0
     frog_cooker: str = ""
     valid: i32 = 0
     error: str = ""
@@ -112,6 +115,9 @@ fun obin_load_project(manifest_hint: str) -> ObinProject:
     project.asset_destination = obin_toml_get_str(document, "assets.destination", "assets")
     project.frog_enabled = obin_toml_get_bool(document, "tool.frog.enabled", 0)
     project.frog_cook_models = obin_toml_get_bool(document, "tool.frog.cook-models", 1)
+    project.frog_cook_textures = obin_toml_get_bool(document, "tool.frog.cook-textures", 1)
+    project.frog_cook_literal_textures = obin_toml_get_bool(document, "tool.frog.cook-literal-textures", 1)
+    project.frog_keep_source_textures = obin_toml_get_bool(document, "tool.frog.keep-source-textures", 0)
     project.frog_cooker = obin_toml_get_str(document, "tool.frog.cooker", "")
     if Memory.strlen(project.name) == 0:
         return obin_project_error(project, "application.name is required")
