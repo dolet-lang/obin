@@ -1,0 +1,39 @@
+import obin.toml
+import obin.platform
+import obin.project
+import obin.frog
+import obin.commands
+
+argc: i32 = Argv.count()
+if argc < 2:
+    obin_print_help()
+    Process.exit(0)
+
+command: str = Str.to_lower(Argv.get(1))
+if Str.equals(command, "help") or Str.equals(command, "--help") or Str.equals(command, "-h"):
+    obin_print_help()
+elif Str.equals(command, "version") or Str.equals(command, "--version") or Str.equals(command, "-v"):
+    obin_print_version()
+elif Str.equals(command, "init"):
+    directory: str = ""
+    if argc >= 3:
+        directory = Argv.get(2)
+    obin_init(directory)
+elif Str.equals(command, "build"):
+    Process.exit(obin_build(obin_parse_options(2, 0)))
+elif Str.equals(command, "run"):
+    Process.exit(obin_run(obin_parse_options(2, 1)))
+elif Str.equals(command, "package"):
+    Process.exit(obin_package(obin_parse_options(2, 0)))
+elif Str.equals(command, "clean"):
+    manifest: str = ""
+    if argc >= 3:
+        manifest = Argv.get(2)
+    Process.exit(obin_clean(manifest))
+elif Str.equals(command, "doctor"):
+    manifest: str = ""
+    if argc >= 3:
+        manifest = Argv.get(2)
+    Process.exit(obin_doctor(manifest))
+else:
+    obin_fail(@"unknown command: {command}")

@@ -1,0 +1,25 @@
+[application]
+name = "obin"
+version = "0.1.0"
+entry = "src/main.dlt"
+type = "console"
+
+[build]
+target = "windows"
+default-profile = "release"
+incremental = true
+
+[profiles.dev]
+optimization = 0
+no-console = false
+
+[profiles.release]
+optimization = 3
+no-console = false
+
+[packages]
+auto-sync = true
+
+[package]
+directory = "dist"
+include-assets = false

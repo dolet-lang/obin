@@ -1,0 +1,162 @@
+##############################
+# Obin project manifest and discovery.
+##############################
+
+struct ObinProject:
+    manifest: str = ""
+    root: str = ""
+    name: str = ""
+    version: str = "0.1.0"
+    entry: str = "src/main.dlt"
+    kind: str = "console"
+    output: str = ""
+    target: str = "windows"
+    default_profile: str = "dev"
+    doletc: str = ""
+    dopm: str = ""
+    package_directory: str = "dist"
+    asset_destination: str = "assets"
+    incremental: i32 = 1
+    auto_sync: i32 = 1
+    include_assets: i32 = 1
+    frog_enabled: i32 = 0
+    frog_cook_models: i32 = 1
+    frog_cooker: str = ""
+    valid: i32 = 0
+    error: str = ""
+
+fun obin_project_error(project: ObinProject, message: str) -> ObinProject:
+    project.valid = 0
+    project.error = message
+    return project
+
+fun obin_safe_version(value: str) -> i32:
+    length: i64 = Memory.strlen(value)
+    if length == 0:
+        return 0
+    index: i64 = 0
+    while index < length:
+        ch: i32 = Memory.read_i8((value as i64) + index) as i32
+        allowed: i32 = 0
+        if ch >= 48 and ch <= 57:
+            allowed = 1
+        elif ch >= 65 and ch <= 90:
+            allowed = 1
+        elif ch >= 97 and ch <= 122:
+            allowed = 1
+        elif ch == 46 or ch == 45 or ch == 95 or ch == 43:
+            allowed = 1
+        if allowed == 0:
+            return 0
+        index = index + 1
+    return 1
+
+fun obin_manifest_in(directory: str) -> str:
+    primary: str = PathOps.join_path(directory, "obin.toml")
+    if PathOps.exists(primary) == 1 and obin_is_directory(primary) == 0:
+        return PathOps.resolve_path(primary)
+    compatible: str = PathOps.join_path(directory, "dolet.toml")
+    if PathOps.exists(compatible) == 1 and obin_is_directory(compatible) == 0:
+        return PathOps.resolve_path(compatible)
+    return ""
+
+fun obin_discover_manifest(hint: str) -> str:
+    if Memory.strlen(hint) > 0:
+        resolved: str = PathOps.resolve_path(hint)
+        if obin_is_directory(resolved) == 1:
+            return obin_manifest_in(resolved)
+        if PathOps.exists(resolved) == 1:
+            return resolved
+        return ""
+    current: str = PathOps.resolve_path(PathOps.get_cwd())
+    depth: i32 = 0
+    while depth < 64:
+        found: str = obin_manifest_in(current)
+        if Memory.strlen(found) > 0:
+            return found
+        parent: str = PathOps.resolve_path(PathOps.get_directory(current))
+        if Memory.strlen(parent) == 0 or Str.equals(Str.to_lower(parent), Str.to_lower(current)):
+            return ""
+        current = parent
+        depth = depth + 1
+    return ""
+
+fun obin_project_default_output(project: ObinProject, profile: str) -> str:
+    filename: str = Str.concat(project.name, ".exe")
+    return PathOps.join_path("build", PathOps.join_path(profile, filename))
+
+fun obin_load_project(manifest_hint: str) -> ObinProject:
+    project: ObinProject = ObinProject()
+    project.manifest = obin_discover_manifest(manifest_hint)
+    if Memory.strlen(project.manifest) == 0:
+        return obin_project_error(project, "could not find obin.toml or dolet.toml")
+    project.root = PathOps.get_directory(project.manifest)
+    document: ObinToml = obin_toml_parse_file(project.manifest)
+    if document.ok == 0:
+        if document.error_line > 0:
+            return obin_project_error(project, @"invalid TOML at line {document.error_line}: {document.error}")
+        return obin_project_error(project, document.error)
+    project.name = obin_toml_get_str(document, "application.name", "")
+    project.version = obin_toml_get_str(document, "application.version", "0.1.0")
+    project.entry = obin_toml_get_str(document, "application.entry", "src/main.dlt")
+    project.kind = Str.to_lower(obin_toml_get_str(document, "application.type", "console"))
+    project.output = obin_toml_get_str(document, "build.output", "")
+    project.target = obin_toml_get_str(document, "build.target", "windows")
+    project.default_profile = obin_toml_get_str(document, "build.default-profile", "dev")
+    project.incremental = obin_toml_get_bool(document, "build.incremental", 1)
+    project.doletc = obin_toml_get_str(document, "tools.doletc", "")
+    project.dopm = obin_toml_get_str(document, "tools.dopm", "")
+    project.auto_sync = obin_toml_get_bool(document, "packages.auto-sync", 1)
+    project.package_directory = obin_toml_get_str(document, "package.directory", "dist")
+    project.include_assets = obin_toml_get_bool(document, "package.include-assets", 1)
+    project.asset_destination = obin_toml_get_str(document, "assets.destination", "assets")
+    project.frog_enabled = obin_toml_get_bool(document, "tool.frog.enabled", 0)
+    project.frog_cook_models = obin_toml_get_bool(document, "tool.frog.cook-models", 1)
+    project.frog_cooker = obin_toml_get_str(document, "tool.frog.cooker", "")
+    if Memory.strlen(project.name) == 0:
+        return obin_project_error(project, "application.name is required")
+    if obin_toml_valid_key(project.name) == 0 or Str.contains(project.name, "."):
+        return obin_project_error(project, "application.name must use letters, digits, '-' or '_'")
+    if obin_safe_version(project.version) == 0:
+        return obin_project_error(project, "application.version contains unsafe path characters")
+    if Memory.strlen(project.entry) == 0:
+        return obin_project_error(project, "application.entry cannot be empty")
+    if Str.equals(project.kind, "console") == false and Str.equals(project.kind, "gui") == false and Str.equals(project.kind, "game") == false:
+        return obin_project_error(project, "application.type must be console, gui, or game")
+    if Memory.strlen(project.default_profile) == 0 or obin_toml_valid_key(project.default_profile) == 0:
+        return obin_project_error(project, "build.default-profile is invalid")
+    project.valid = 1
+    return project
+
+fun obin_project_document(project: ObinProject) -> ObinToml:
+    return obin_toml_parse_file(project.manifest)
+
+fun obin_profile_optimization(document: ObinToml, profile: str) -> i32:
+    key: str = Str.concat("profiles.", Str.concat(profile, ".optimization"))
+    fallback: i32 = 0
+    if Str.equals(profile, "release"):
+        fallback = 3
+    value: i32 = obin_toml_get_i32(document, key, fallback)
+    if value < 0:
+        return 0
+    if value > 3:
+        return 3
+    return value
+
+fun obin_profile_no_console(document: ObinToml, project: ObinProject, profile: str) -> i32:
+    default_value: i32 = 0
+    if Str.equals(project.kind, "gui") or Str.equals(project.kind, "game"):
+        default_value = 1
+    key: str = Str.concat("profiles.", Str.concat(profile, ".no-console"))
+    return obin_toml_get_bool(document, key, default_value)
+
+fun obin_project_entry(project: ObinProject) -> str:
+    return obin_resolve_from(project.root, project.entry)
+
+fun obin_project_output(project: ObinProject, profile: str, override: str) -> str:
+    selected: str = override
+    if Memory.strlen(selected) == 0:
+        selected = project.output
+    if Memory.strlen(selected) == 0:
+        selected = obin_project_default_output(project, profile)
+    return obin_resolve_from(project.root, selected)

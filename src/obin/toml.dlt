@@ -1,0 +1,475 @@
+##############################
+# Obin TOML parser
+# Focused, strict TOML subset for application manifests.
+##############################
+
+imm OBIN_TOML_STRING: i32 = 1
+imm OBIN_TOML_INTEGER: i32 = 2
+imm OBIN_TOML_FLOAT: i32 = 3
+imm OBIN_TOML_BOOL: i32 = 4
+imm OBIN_TOML_ARRAY: i32 = 5
+
+struct ObinToml:
+    keys: i64 = 0
+    values: i64 = 0
+    kinds: i64 = 0
+    lines: i64 = 0
+    ok: i32 = 1
+    error_line: i32 = 0
+    error: str = ""
+
+fun obin_toml_raw_list() -> i64:
+    return Memory.malloc_zeroed(16)
+
+fun obin_toml_raw_size(items: i64) -> i64:
+    if items == 0:
+        return 0
+    return Memory.read_i32(items) as i64
+
+fun obin_toml_raw_get(items: i64, index: i64) -> i64:
+    data: i64 = Memory.read_i64(items + 8)
+    return Memory.read_i64(data + index * 8)
+
+fun obin_toml_raw_append(items: i64, value: i64):
+    size: i32 = Memory.read_i32(items)
+    capacity: i32 = Memory.read_i32(items + 4)
+    data: i64 = Memory.read_i64(items + 8)
+    if size >= capacity:
+        new_capacity: i32 = capacity * 2
+        if new_capacity < 8:
+            new_capacity = 8
+        data = Memory.realloc(data, (new_capacity as i64) * 8)
+        Memory.write_i64(items + 8, data)
+        Memory.write_i32(items + 4, new_capacity)
+    Memory.write_i64(data + ((size as i64) * 8), value)
+    Memory.write_i32(items, size + 1)
+
+fun obin_toml_new() -> ObinToml:
+    return ObinToml(
+        keys=obin_toml_raw_list(),
+        values=obin_toml_raw_list(),
+        kinds=obin_toml_raw_list(),
+        lines=obin_toml_raw_list(),
+        ok=1,
+        error_line=0,
+        error=""
+    )
+
+fun obin_toml_error(document: ObinToml, line: i32, message: str) -> ObinToml:
+    document.ok = 0
+    document.error_line = line
+    document.error = message
+    return document
+
+fun obin_toml_char_at(value: str, index: i64) -> i32:
+    return Memory.read_i8((value as i64) + index) as i32
+
+fun obin_toml_is_key_char(ch: i32) -> i32:
+    if ch >= 65 and ch <= 90:
+        return 1
+    if ch >= 97 and ch <= 122:
+        return 1
+    if ch >= 48 and ch <= 57:
+        return 1
+    if ch == 95 or ch == 45 or ch == 46:
+        return 1
+    return 0
+
+fun obin_toml_valid_key(value: str) -> i32:
+    length: i64 = Memory.strlen(value)
+    if length == 0:
+        return 0
+    index: i64 = 0
+    previous_dot: i32 = 1
+    while index < length:
+        ch: i32 = obin_toml_char_at(value, index)
+        if obin_toml_is_key_char(ch) == 0:
+            return 0
+        if ch == 46:
+            if previous_dot == 1:
+                return 0
+            previous_dot = 1
+        else:
+            previous_dot = 0
+        index = index + 1
+    if previous_dot == 1:
+        return 0
+    return 1
+
+fun obin_toml_strip_comment(line: str) -> str:
+    length: i64 = Memory.strlen(line)
+    quote: i32 = 0
+    escaped: i32 = 0
+    brackets: i32 = 0
+    index: i64 = 0
+    while index < length:
+        ch: i32 = obin_toml_char_at(line, index)
+        if quote == 34:
+            if ch == 34 and escaped == 0:
+                quote = 0
+            if ch == 92 and escaped == 0:
+                escaped = 1
+            else:
+                escaped = 0
+        elif quote == 39:
+            if ch == 39:
+                quote = 0
+        else:
+            if ch == 34 or ch == 39:
+                quote = ch
+            elif ch == 91:
+                brackets = brackets + 1
+            elif ch == 93 and brackets > 0:
+                brackets = brackets - 1
+            elif ch == 35:
+                return Str.substring(line, 0, index)
+        index = index + 1
+    return Str.strcpy(line)
+
+fun obin_toml_find_assignment(line: str) -> i64:
+    length: i64 = Memory.strlen(line)
+    quote: i32 = 0
+    escaped: i32 = 0
+    brackets: i32 = 0
+    index: i64 = 0
+    while index < length:
+        ch: i32 = obin_toml_char_at(line, index)
+        if quote == 34:
+            if ch == 34 and escaped == 0:
+                quote = 0
+            if ch == 92 and escaped == 0:
+                escaped = 1
+            else:
+                escaped = 0
+        elif quote == 39:
+            if ch == 39:
+                quote = 0
+        else:
+            if ch == 34 or ch == 39:
+                quote = ch
+            elif ch == 91:
+                brackets = brackets + 1
+            elif ch == 93 and brackets > 0:
+                brackets = brackets - 1
+            elif ch == 61 and brackets == 0:
+                return index
+        index = index + 1
+    return -1
+
+fun obin_toml_unquote(value: str) -> str:
+    length: i64 = Memory.strlen(value)
+    if length < 2:
+        return ""
+    quote: i32 = obin_toml_char_at(value, 0)
+    if obin_toml_char_at(value, length - 1) != quote:
+        return ""
+    if quote == 39:
+        return Str.substring(value, 1, length - 1)
+    output: i64 = Memory.malloc_zeroed(length)
+    source_index: i64 = 1
+    output_index: i64 = 0
+    while source_index < length - 1:
+        ch: i32 = obin_toml_char_at(value, source_index)
+        if ch == 92 and source_index + 1 < length - 1:
+            source_index = source_index + 1
+            escaped: i32 = obin_toml_char_at(value, source_index)
+            if escaped == 110:
+                ch = 10
+            elif escaped == 114:
+                ch = 13
+            elif escaped == 116:
+                ch = 9
+            elif escaped == 34:
+                ch = 34
+            elif escaped == 92:
+                ch = 92
+            else:
+                Memory.free(output)
+                return ""
+        Memory.write_i8(output + output_index, ch as i8)
+        output_index = output_index + 1
+        source_index = source_index + 1
+    Memory.write_i8(output + output_index, 0 as i8)
+    return output as str
+
+fun obin_toml_number_kind(value: str) -> i32:
+    length: i64 = Memory.strlen(value)
+    if length == 0:
+        return 0
+    dots: i32 = 0
+    digits: i32 = 0
+    index: i64 = 0
+    while index < length:
+        ch: i32 = obin_toml_char_at(value, index)
+        if ch >= 48 and ch <= 57:
+            digits = digits + 1
+        elif ch == 95:
+            if index == 0:
+                return 0
+            if index + 1 >= length:
+                return 0
+        elif ch == 45 or ch == 43:
+            if index != 0:
+                return 0
+        elif ch == 46:
+            dots = dots + 1
+            if dots > 1:
+                return 0
+        else:
+            return 0
+        index = index + 1
+    if digits == 0:
+        return 0
+    if dots == 1:
+        return OBIN_TOML_FLOAT
+    return OBIN_TOML_INTEGER
+
+fun obin_toml_array_valid(value: str) -> i32:
+    length: i64 = Memory.strlen(value)
+    if length < 2:
+        return 0
+    if obin_toml_char_at(value, 0) != 91:
+        return 0
+    if obin_toml_char_at(value, length - 1) != 93:
+        return 0
+    quote: i32 = 0
+    escaped: i32 = 0
+    index: i64 = 1
+    while index < length - 1:
+        ch: i32 = obin_toml_char_at(value, index)
+        if quote == 34:
+            if ch == 34 and escaped == 0:
+                quote = 0
+            if ch == 92 and escaped == 0:
+                escaped = 1
+            else:
+                escaped = 0
+        elif quote == 39:
+            if ch == 39:
+                quote = 0
+        else:
+            if ch == 34 or ch == 39:
+                quote = ch
+            elif ch == 91 or ch == 93:
+                return 0
+        index = index + 1
+    if quote != 0:
+        return 0
+    return 1
+
+fun obin_toml_has_key(document: ObinToml, key: str) -> i32:
+    index: i64 = 0
+    while index < obin_toml_raw_size(document.keys):
+        existing: str = obin_toml_raw_get(document.keys, index) as str
+        if Str.equals(existing, key):
+            return 1
+        index = index + 1
+    return 0
+
+fun obin_toml_add(document: ObinToml, key: str, value: str, kind: i32, line: i32) -> ObinToml:
+    if obin_toml_has_key(document, key):
+        return obin_toml_error(document, line, @"duplicate key: {key}")
+    obin_toml_raw_append(document.keys, key as i64)
+    obin_toml_raw_append(document.values, value as i64)
+    obin_toml_raw_append(document.kinds, kind as i64)
+    obin_toml_raw_append(document.lines, line as i64)
+    return document
+
+fun obin_toml_parse_line(document: ObinToml, raw_line: str, section: str, line_number: i32) -> ObinToml:
+    without_comment: str = obin_toml_strip_comment(raw_line)
+    line: str = Str.trim(without_comment)
+    length: i64 = Memory.strlen(line)
+    if length == 0:
+        return document
+    if obin_toml_char_at(line, 0) == 91:
+        return obin_toml_error(document, line_number, "internal section routing error")
+    assignment: i64 = obin_toml_find_assignment(line)
+    if assignment < 0:
+        return obin_toml_error(document, line_number, "expected key = value")
+    key_part: str = Str.substring(line, 0, assignment)
+    raw_value_part: str = Str.substring(line, assignment + 1, length)
+    key: str = Str.trim(key_part)
+    raw_value: str = Str.trim(raw_value_part)
+    if obin_toml_valid_key(key) == 0:
+        return obin_toml_error(document, line_number, @"invalid key: {key}")
+    if Memory.strlen(raw_value) == 0:
+        return obin_toml_error(document, line_number, @"missing value for {key}")
+    full_key: str = key
+    if Memory.strlen(section) > 0:
+        full_key = Str.concat(section, Str.concat(".", key))
+    first: i32 = obin_toml_char_at(raw_value, 0)
+    value: str = raw_value
+    kind: i32 = 0
+    if first == 34 or first == 39:
+        value = obin_toml_unquote(raw_value)
+        if Memory.strlen(value) == 0 and Memory.strlen(raw_value) != 2:
+            return obin_toml_error(document, line_number, @"invalid string value for {full_key}")
+        kind = OBIN_TOML_STRING
+    elif Str.equals(raw_value, "true") or Str.equals(raw_value, "false"):
+        kind = OBIN_TOML_BOOL
+    elif first == 91:
+        if obin_toml_array_valid(raw_value) == 0:
+            return obin_toml_error(document, line_number, @"invalid array for {full_key}")
+        kind = OBIN_TOML_ARRAY
+    else:
+        kind = obin_toml_number_kind(raw_value)
+        if kind == 0:
+            return obin_toml_error(document, line_number, @"unsupported value for {full_key}")
+    return obin_toml_add(document, full_key, value, kind, line_number)
+
+fun obin_toml_parse(source: str) -> ObinToml:
+    document: ObinToml = obin_toml_new()
+    section: str = ""
+    source_length: i64 = Memory.strlen(source)
+    line_start: i64 = 0
+    cursor: i64 = 0
+    line_number: i32 = 1
+    while cursor <= source_length:
+        at_end: i32 = 0
+        if cursor == source_length:
+            at_end = 1
+        ch: i32 = 0
+        if at_end == 0:
+            ch = obin_toml_char_at(source, cursor)
+        if at_end == 1 or ch == 10:
+            raw_line: str = Str.substring(source, line_start, cursor)
+            without_comment: str = obin_toml_strip_comment(raw_line)
+            line: str = Str.trim(without_comment)
+            length: i64 = Memory.strlen(line)
+            is_table: i32 = 0
+            if length > 0:
+                if obin_toml_char_at(line, 0) == 91:
+                    is_table = 1
+            if is_table == 1:
+                if length < 3:
+                    return obin_toml_error(document, line_number, "invalid table header")
+                if obin_toml_char_at(line, length - 1) != 93:
+                    return obin_toml_error(document, line_number, "invalid table header")
+                table_raw: str = Str.substring(line, 1, length - 1)
+                table: str = Str.trim(table_raw)
+                if obin_toml_valid_key(table) == 0:
+                    return obin_toml_error(document, line_number, @"invalid table name: {table}")
+                section = table
+            elif length > 0:
+                document = obin_toml_parse_line(document, line, section, line_number)
+                if document.ok == 0:
+                    return document
+            line_start = cursor + 1
+            line_number = line_number + 1
+        cursor = cursor + 1
+    return document
+
+fun obin_toml_parse_file(path: str) -> ObinToml:
+    file: File = File.open_cwd(path, "r")
+    if file.is_valid() == false:
+        document: ObinToml = obin_toml_new()
+        return obin_toml_error(document, 0, @"could not open {path}")
+    source: str = file.read_text()
+    file.close()
+    return obin_toml_parse(source)
+
+fun obin_toml_index_of(document: ObinToml, key: str) -> i64:
+    index: i64 = 0
+    while index < obin_toml_raw_size(document.keys):
+        existing: str = obin_toml_raw_get(document.keys, index) as str
+        if Str.equals(existing, key):
+            return index
+        index = index + 1
+    return -1
+
+fun obin_toml_get_str(document: ObinToml, key: str, fallback: str) -> str:
+    index: i64 = obin_toml_index_of(document, key)
+    if index < 0:
+        return fallback
+    if (obin_toml_raw_get(document.kinds, index) as i32) != OBIN_TOML_STRING:
+        return fallback
+    value: str = obin_toml_raw_get(document.values, index) as str
+    return value
+
+fun obin_toml_get_raw(document: ObinToml, key: str, fallback: str) -> str:
+    index: i64 = obin_toml_index_of(document, key)
+    if index < 0:
+        return fallback
+    return obin_toml_raw_get(document.values, index) as str
+
+fun obin_toml_clean_number(value: str) -> str:
+    return Str.replace(value, "_", "")
+
+fun obin_toml_get_i32(document: ObinToml, key: str, fallback: i32) -> i32:
+    index: i64 = obin_toml_index_of(document, key)
+    if index < 0:
+        return fallback
+    if (obin_toml_raw_get(document.kinds, index) as i32) != OBIN_TOML_INTEGER:
+        return fallback
+    raw: str = obin_toml_raw_get(document.values, index) as str
+    clean: str = obin_toml_clean_number(raw)
+    return Str.parse_i32(clean)
+
+fun obin_toml_get_bool(document: ObinToml, key: str, fallback: i32) -> i32:
+    index: i64 = obin_toml_index_of(document, key)
+    if index < 0:
+        return fallback
+    if (obin_toml_raw_get(document.kinds, index) as i32) != OBIN_TOML_BOOL:
+        return fallback
+    raw: str = obin_toml_raw_get(document.values, index) as str
+    if Str.equals(raw, "true"):
+        return 1
+    return 0
+
+fun obin_toml_array(document: ObinToml, key: str) -> list<str>:
+    result: list<str> = []
+    index: i64 = obin_toml_index_of(document, key)
+    if index < 0:
+        return result
+    if (obin_toml_raw_get(document.kinds, index) as i32) != OBIN_TOML_ARRAY:
+        return result
+    raw: str = obin_toml_raw_get(document.values, index) as str
+    length: i64 = Memory.strlen(raw)
+    item_start: i64 = 1
+    cursor: i64 = 1
+    quote: i32 = 0
+    escaped: i32 = 0
+    while cursor < length:
+        ch: i32 = obin_toml_char_at(raw, cursor)
+        delimiter: i32 = 0
+        if cursor == length - 1:
+            delimiter = 1
+        elif quote == 0 and ch == 44:
+            delimiter = 1
+        if delimiter == 1:
+            item_raw: str = Str.substring(raw, item_start, cursor)
+            item: str = Str.trim(item_raw)
+            if Memory.strlen(item) > 0:
+                first: i32 = obin_toml_char_at(item, 0)
+                if first == 34 or first == 39:
+                    result.append(obin_toml_unquote(item))
+                else:
+                    result.append(item)
+            item_start = cursor + 1
+        else:
+            if quote == 34:
+                if ch == 34 and escaped == 0:
+                    quote = 0
+                if ch == 92 and escaped == 0:
+                    escaped = 1
+                else:
+                    escaped = 0
+            elif quote == 39:
+                if ch == 39:
+                    quote = 0
+            elif ch == 34 or ch == 39:
+                quote = ch
+        cursor = cursor + 1
+    return result
+
+fun obin_toml_section_keys(document: ObinToml, section: str) -> list<str>:
+    result: list<str> = []
+    prefix: str = Str.concat(section, ".")
+    prefix_length: i64 = Memory.strlen(prefix)
+    index: i64 = 0
+    while index < obin_toml_raw_size(document.keys):
+        full: str = obin_toml_raw_get(document.keys, index) as str
+        if Str.starts_with(full, prefix):
+            result.append(Str.substring(full, prefix_length, Memory.strlen(full)))
+        index = index + 1
+    return result

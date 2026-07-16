@@ -1,0 +1,234 @@
+##############################
+# Optional Frog Engine asset adapter.
+##############################
+
+import json
+
+imm OBIN_FROG_MODEL_MAGIC: i32 = 0x4D475246
+imm OBIN_FROG_MODEL_VERSION: i32 = 2
+
+fun obin_frog_model_output(source: str) -> str:
+    length: i64 = Memory.strlen(source)
+    if length >= 5:
+        return Str.concat(Str.substring(source, 0, length - 5), ".frogmodel")
+    return Str.concat(source, ".frogmodel")
+
+fun obin_frog_header_valid(path: str) -> i32:
+    file: File = File.open_cwd(path, "r")
+    if file.is_valid() == false:
+        return 0
+    if file.get_size() < 8:
+        file.close()
+        return 0
+    header: i64 = Memory.malloc_zeroed(8)
+    count: i32 = file.read_bytes(header, 8)
+    file.close()
+    valid: i32 = 0
+    if count == 8:
+        if Memory.read_i32(header) == OBIN_FROG_MODEL_MAGIC:
+            if Memory.read_i32(header + 4) == OBIN_FROG_MODEL_VERSION:
+                valid = 1
+    Memory.free(header)
+    return valid
+
+fun obin_frog_find_cooker_source(doletc: str) -> str:
+    compiler_directory: str = PathOps.get_directory(doletc)
+    candidates: list<str> = []
+    candidates.append(obin_resolve_from(compiler_directory, "..\\packages\\frog\\tools\\frog_cooker.dlt"))
+    candidates.append(obin_resolve_from(PathOps.get_exe_directory(), "..\\packages\\frog\\tools\\frog_cooker.dlt"))
+    candidates.append(obin_resolve_from(PathOps.get_exe_directory(), "..\\..\\dolet-compiler\\packages\\frog\\tools\\frog_cooker.dlt"))
+    index: i64 = 0
+    while index < candidates.size():
+        if PathOps.exists(candidates.get_str(index)) == 1:
+            return candidates.get_str(index)
+        index = index + 1
+    return ""
+
+fun obin_frog_ensure_cooker(project: ObinProject, doletc: str) -> str:
+    if Memory.strlen(project.frog_cooker) > 0:
+        configured: str = obin_resolve_from(project.root, project.frog_cooker)
+        if PathOps.exists(configured) == 1:
+            return configured
+        return ""
+    tools_directory: str = obin_resolve_from(project.root, ".obin\\tools")
+    if obin_ensure_directory(tools_directory) == 0:
+        return ""
+    cooker: str = PathOps.join_path(tools_directory, "frog-cooker.exe")
+    source: str = obin_frog_find_cooker_source(doletc)
+    if Memory.strlen(source) == 0:
+        return ""
+    rebuild: i32 = 0
+    if PathOps.exists(cooker) == 0 or obin_file_stamp(source) > obin_file_stamp(cooker) or obin_file_stamp(doletc) > obin_file_stamp(cooker):
+        rebuild = 1
+    if rebuild == 1:
+        print("[obin:frog] building the cooker from Dolet source")
+        command: str = Str.concat(obin_quote(doletc), Str.concat(" ", Str.concat(obin_quote(source), Str.concat(" -o ", Str.concat(obin_quote(cooker), " -O3 --target windows")))))
+        if obin_run_in_directory(command, project.root) != 0:
+            return ""
+    return cooker
+
+fun obin_frog_literal_after(source: str, marker: str) -> str:
+    position: i64 = Str.index_of(source, marker)
+    if position < 0:
+        return ""
+    length: i64 = Memory.strlen(source)
+    cursor: i64 = position + Memory.strlen(marker)
+    while cursor < length and Memory.read_i8((source as i64) + cursor) != 34:
+        cursor = cursor + 1
+    if cursor >= length:
+        return ""
+    start: i64 = cursor + 1
+    cursor = start
+    while cursor < length and Memory.read_i8((source as i64) + cursor) != 34:
+        cursor = cursor + 1
+    if cursor >= length:
+        return ""
+    return Str.substring(source, start, cursor)
+
+fun obin_frog_add_root(roots: list<str>, project: ObinProject, path: str):
+    if Memory.strlen(path) == 0:
+        return
+    resolved: str = obin_resolve_from(project.root, path)
+    if obin_is_directory(resolved) == 1:
+        obin_add_unique(roots, resolved)
+
+fun obin_frog_resolve_model(reference: str, source_file: str, project: ObinProject, roots: list<str>) -> str:
+    if PathOps.is_absolute(reference) and PathOps.exists(reference) == 1:
+        return PathOps.resolve_path(reference)
+    from_source: str = obin_resolve_from(PathOps.get_directory(source_file), reference)
+    if PathOps.exists(from_source) == 1:
+        return from_source
+    from_root: str = obin_resolve_from(project.root, reference)
+    if PathOps.exists(from_root) == 1:
+        return from_root
+    index: i64 = 0
+    while index < roots.size():
+        candidate: str = obin_resolve_from(roots.get_str(index), reference)
+        if PathOps.exists(candidate) == 1:
+            return candidate
+        index = index + 1
+    return ""
+
+fun obin_frog_collect_literals(source: str, source_file: str, project: ObinProject, roots: list<str>, models: list<str>):
+    length: i64 = Memory.strlen(source)
+    cursor: i64 = 0
+    while cursor < length:
+        if Memory.read_i8((source as i64) + cursor) == 34:
+            start: i64 = cursor + 1
+            cursor = start
+            escaped: i32 = 0
+            while cursor < length:
+                ch: i32 = Memory.read_i8((source as i64) + cursor) as i32
+                if ch == 34 and escaped == 0:
+                    break
+                if ch == 92 and escaped == 0:
+                    escaped = 1
+                else:
+                    escaped = 0
+                cursor = cursor + 1
+            if cursor < length:
+                literal: str = Str.substring(source, start, cursor)
+                lower: str = Str.to_lower(literal)
+                if Str.ends_with(lower, ".gltf") and Str.ends_with(lower, ".frog.gltf") == false:
+                    resolved: str = obin_frog_resolve_model(literal, source_file, project, roots)
+                    if Memory.strlen(resolved) > 0:
+                        obin_add_unique(models, resolved)
+        cursor = cursor + 1
+
+fun obin_frog_discover_models(project: ObinProject, document: ObinToml) -> list<str>:
+    files: list<str> = []
+    roots: list<str> = []
+    models: list<str> = []
+    entry: str = obin_project_entry(project)
+    source_root: str = PathOps.get_directory(entry)
+    obin_collect_files(source_root, ".dlt", files, 0)
+    obin_frog_add_root(roots, project, "assets")
+    obin_frog_add_root(roots, project, "src\\assets")
+    configured_roots: list<str> = obin_toml_array(document, "assets.roots")
+    root_index: i64 = 0
+    while root_index < configured_roots.size():
+        obin_frog_add_root(roots, project, configured_roots.get_str(root_index))
+        root_index = root_index + 1
+    file_index: i64 = 0
+    while file_index < files.size():
+        file: File = File.open_cwd(files.get_str(file_index), "r")
+        if file.is_valid():
+            source: str = file.read_text()
+            file.close()
+            mount: str = obin_frog_literal_after(source, "Assets.mount")
+            if Memory.strlen(mount) > 0:
+                obin_frog_add_root(roots, project, mount)
+        file_index = file_index + 1
+    file_index = 0
+    while file_index < files.size():
+        source_file: str = files.get_str(file_index)
+        file: File = File.open_cwd(source_file, "r")
+        if file.is_valid():
+            source: str = file.read_text()
+            file.close()
+            obin_frog_collect_literals(source, source_file, project, roots, models)
+        file_index = file_index + 1
+    return models
+
+fun obin_frog_model_stale(source: str, output: str, cooker: str, force: i32) -> i32:
+    if force == 1:
+        return 1
+    if PathOps.exists(output) == 0:
+        return 1
+    if obin_frog_header_valid(output) == 0:
+        return 1
+    output_stamp: i64 = obin_file_stamp(output)
+    if obin_file_stamp(source) > output_stamp or obin_file_stamp(cooker) > output_stamp:
+        return 1
+    document: JsonDocument = Json.parse_file(source)
+    if document.valid() == 0:
+        return 1
+    buffers: JsonValue = document.root.get("buffers")
+    directory: str = PathOps.get_directory(source)
+    index: i32 = 0
+    while index < buffers.size():
+        uri: str = buffers.at(index).get_str("uri")
+        if Memory.strlen(uri) > 0 and Str.starts_with(uri, "data:") == false:
+            dependency: str = obin_resolve_from(directory, uri)
+            if PathOps.exists(dependency) == 0 or obin_file_stamp(dependency) > output_stamp:
+                return 1
+        index = index + 1
+    return 0
+
+fun obin_frog_cook(project: ObinProject, document: ObinToml, doletc: str, force: i32) -> i32:
+    if project.frog_enabled == 0 or project.frog_cook_models == 0:
+        return 0
+    models: list<str> = obin_frog_discover_models(project, document)
+    if models.size() == 0:
+        print("[obin:frog] models: no referenced glTF assets")
+        return 0
+    cooker: str = obin_frog_ensure_cooker(project, doletc)
+    if Memory.strlen(cooker) == 0:
+        print("obin: Frog cooker is unavailable; check the frog package or tool.frog.cooker")
+        return 1
+    lods: list<str> = obin_toml_array(document, "tool.frog.lods")
+    cooked: i32 = 0
+    index: i64 = 0
+    while index < models.size():
+        source: str = models.get_str(index)
+        output: str = obin_frog_model_output(source)
+        if obin_frog_model_stale(source, output, cooker, force) == 1:
+            print(@"[obin:frog] cooking {source}")
+            command: str = Str.concat(obin_quote(cooker), Str.concat(" ", obin_quote(source)))
+            if lods.size() == 0:
+                command = Str.concat(command, " --lods --preserve-materials")
+            else:
+                lod_index: i64 = 0
+                while lod_index < lods.size():
+                    command = Str.concat(command, Str.concat(" --lod ", obin_quote(lods.get_str(lod_index))))
+                    lod_index = lod_index + 1
+            if obin_run_in_directory(command, project.root) != 0:
+                return 1
+            cooked = cooked + 1
+        index = index + 1
+    total: i64 = models.size()
+    if cooked == 0:
+        print(@"[obin:frog] models: {total} up to date")
+    else:
+        print(@"[obin:frog] models: cooked {cooked}, total {total}")
+    return 0

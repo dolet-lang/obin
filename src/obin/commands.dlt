@@ -1,0 +1,414 @@
+##############################
+# Obin command orchestration.
+##############################
+
+struct ObinOptions:
+    manifest: str = ""
+    profile: str = ""
+    target: str = ""
+    output: str = ""
+    compiler: str = ""
+    app_arguments: str = ""
+    force: i32 = 0
+    no_dependencies: i32 = 0
+    no_tools: i32 = 0
+    verbose: i32 = 0
+
+g_obin_last_output: str = ""
+
+fun obin_fail(message: str):
+    print(@"obin: {message}")
+    Process.exit(1)
+
+fun obin_print_version():
+    print("obin 0.1.0")
+
+fun obin_print_help():
+    print("Obin - application tooling for the Dolet language")
+    print("")
+    print("Usage:")
+    print("  obin init [directory]")
+    print("  obin build [manifest] [options]")
+    print("  obin run [manifest] [options] [-- application arguments]")
+    print("  obin package [manifest] [options]")
+    print("  obin clean [manifest]")
+    print("  obin doctor [manifest]")
+    print("")
+    print("Build options:")
+    print("  --profile <name>    Select a manifest profile")
+    print("  --target <name>     Override the compiler target")
+    print("  --out, -o <path>    Override the executable path")
+    print("  --compiler <path>   Override doletc")
+    print("  --force             Rebuild and recook assets")
+    print("  --no-deps           Skip DOPM dependency sync")
+    print("  --no-tools          Skip tool adapters and hooks")
+    print("  --verbose           Print invoked commands")
+
+fun obin_parse_options(start: i32, allow_app_arguments: i32) -> ObinOptions:
+    options: ObinOptions = ObinOptions()
+    index: i32 = start
+    application_mode: i32 = 0
+    while index < Argv.count():
+        argument: str = Argv.get(index)
+        if application_mode == 1:
+            options.app_arguments = Str.concat(options.app_arguments, Str.concat(" ", obin_quote(argument)))
+        elif Str.equals(argument, "--"):
+            if allow_app_arguments == 0:
+                obin_fail("unexpected --")
+            application_mode = 1
+        elif Str.equals(argument, "--profile"):
+            index = index + 1
+            if index >= Argv.count():
+                obin_fail("--profile requires a name")
+            options.profile = Argv.get(index)
+        elif Str.equals(argument, "--target"):
+            index = index + 1
+            if index >= Argv.count():
+                obin_fail("--target requires a name")
+            options.target = Argv.get(index)
+        elif Str.equals(argument, "--out") or Str.equals(argument, "-o"):
+            index = index + 1
+            if index >= Argv.count():
+                obin_fail("--out requires a path")
+            options.output = Argv.get(index)
+        elif Str.equals(argument, "--compiler"):
+            index = index + 1
+            if index >= Argv.count():
+                obin_fail("--compiler requires a path")
+            options.compiler = Argv.get(index)
+        elif Str.equals(argument, "--force"):
+            options.force = 1
+        elif Str.equals(argument, "--no-deps"):
+            options.no_dependencies = 1
+        elif Str.equals(argument, "--no-tools"):
+            options.no_tools = 1
+        elif Str.equals(argument, "--verbose") or Str.equals(argument, "-v"):
+            options.verbose = 1
+        elif Str.starts_with(argument, "-"):
+            obin_fail(@"unknown option: {argument}")
+        elif Memory.strlen(options.manifest) == 0:
+            options.manifest = argument
+        else:
+            obin_fail(@"unexpected argument: {argument}")
+        index = index + 1
+    return options
+
+fun obin_require_project(hint: str) -> ObinProject:
+    project: ObinProject = obin_load_project(hint)
+    if project.valid == 0:
+        obin_fail(project.error)
+    return project
+
+fun obin_read_text(path: str) -> str:
+    file: File = File.open_cwd(path, "r")
+    if file.is_valid() == false:
+        return ""
+    result: str = file.read_text()
+    file.close()
+    return result
+
+fun obin_dependency_signature(document: ObinToml) -> str:
+    dependencies: list<str> = obin_toml_section_keys(document, "dependencies")
+    signature: str = ""
+    index: i64 = 0
+    while index < dependencies.size():
+        name: str = dependencies.get_str(index)
+        key: str = Str.concat("dependencies.", name)
+        signature = Str.concat(signature, Str.concat(name, Str.concat("=", Str.concat(obin_toml_get_raw(document, key, "*"), "\n"))))
+        index = index + 1
+    return signature
+
+fun obin_sync_dependencies(project: ObinProject, document: ObinToml, force: i32) -> i32:
+    dependencies: list<str> = obin_toml_section_keys(document, "dependencies")
+    if dependencies.size() == 0 or project.auto_sync == 0:
+        return 0
+    signature: str = obin_dependency_signature(document)
+    state: str = obin_resolve_from(project.root, ".obin\\dependencies.state")
+    if force == 0:
+        if PathOps.exists(state) == 1:
+            if Str.equals(obin_read_text(state), signature):
+                return 0
+    configured_dopm: str = project.dopm
+    if Memory.strlen(configured_dopm) > 0:
+        project_dopm: str = obin_resolve_from(project.root, configured_dopm)
+        if PathOps.exists(project_dopm) == 1:
+            configured_dopm = project_dopm
+    dopm: str = obin_find_dopm(configured_dopm)
+    if Memory.strlen(dopm) == 0:
+        print("obin: dependencies are declared but DOPM was not found")
+        print("      set tools.dopm or OBIN_DOPM, or build with --no-deps")
+        return 1
+    print("[obin] syncing dependencies with DOPM")
+    index: i64 = 0
+    while index < dependencies.size():
+        name: str = dependencies.get_str(index)
+        command: str = Str.concat(obin_quote(dopm), Str.concat(" install ", obin_quote(name)))
+        if obin_run_in_directory(command, project.root) != 0:
+            print(@"obin: DOPM failed while installing {name}")
+            return 1
+        index = index + 1
+    if obin_write_text(state, signature) == 0:
+        print("obin: warning: could not write dependency state")
+    return 0
+
+fun obin_run_hooks(project: ObinProject, document: ObinToml, name: str, verbose: i32) -> i32:
+    key: str = Str.concat("hooks.", name)
+    hooks: list<str> = obin_toml_array(document, key)
+    index: i64 = 0
+    while index < hooks.size():
+        command: str = hooks.get_str(index)
+        print(@"[obin] hook {name}")
+        if verbose == 1:
+            print(@"       {command}")
+        code: i32 = obin_run_in_directory(command, project.root)
+        if code != 0:
+            print(@"obin: hook {name} failed with exit code {code}")
+            return code
+        index = index + 1
+    return 0
+
+fun obin_sources_newer(project: ObinProject, output: str, doletc: str) -> i32:
+    if PathOps.exists(output) == 0:
+        return 1
+    stamp: i64 = obin_file_stamp(output)
+    if obin_file_stamp(project.manifest) > stamp or obin_file_stamp(doletc) > stamp:
+        return 1
+    files: list<str> = []
+    source_root: str = PathOps.get_directory(obin_project_entry(project))
+    obin_collect_files(source_root, ".dlt", files, 0)
+    index: i64 = 0
+    while index < files.size():
+        if obin_file_stamp(files.get_str(index)) > stamp:
+            return 1
+        index = index + 1
+    return 0
+
+fun obin_build(options: ObinOptions) -> i32:
+    project: ObinProject = obin_require_project(options.manifest)
+    document: ObinToml = obin_project_document(project)
+    profile: str = options.profile
+    if Memory.strlen(profile) == 0:
+        profile = project.default_profile
+    entry: str = obin_project_entry(project)
+    if PathOps.exists(entry) == 0:
+        print(@"obin: entry file not found: {entry}")
+        return 1
+    configured_compiler: str = options.compiler
+    if Memory.strlen(configured_compiler) == 0:
+        configured_compiler = project.doletc
+    if Memory.strlen(configured_compiler) > 0:
+        project_compiler: str = obin_resolve_from(project.root, configured_compiler)
+        if PathOps.exists(project_compiler) == 1:
+            configured_compiler = project_compiler
+    doletc: str = obin_find_doletc(configured_compiler)
+    if Memory.strlen(doletc) == 0:
+        print("obin: doletc was not found; set tools.doletc, OBIN_DOLETC, or PATH")
+        return 1
+    output: str = obin_project_output(project, profile, options.output)
+    target: str = options.target
+    if Memory.strlen(target) == 0:
+        target = project.target
+    if options.no_dependencies == 0:
+        if obin_sync_dependencies(project, document, options.force) != 0:
+            return 1
+    if options.no_tools == 0:
+        if obin_run_hooks(project, document, "before-build", options.verbose) != 0:
+            return 1
+        if obin_frog_cook(project, document, doletc, options.force) != 0:
+            return 1
+    if project.incremental == 1:
+        if options.force == 0:
+            if obin_sources_newer(project, output, doletc) == 0:
+                print(@"[obin] up to date: {output}")
+                g_obin_last_output = output
+                return 0
+    if obin_ensure_directory(PathOps.get_directory(output)) == 0:
+        print(@"obin: could not create output directory for {output}")
+        return 1
+    optimization: i32 = obin_profile_optimization(document, profile)
+    optimization_flag: str = Str.concat(" -O", Convert.i32_to_str(optimization))
+    command: str = Str.concat(obin_quote(doletc), Str.concat(" ", Str.concat(obin_quote(entry), Str.concat(" -o ", Str.concat(obin_quote(output), optimization_flag)))))
+    if Memory.strlen(target) > 0:
+        command = Str.concat(command, Str.concat(" --target ", obin_quote(target)))
+    if obin_profile_no_console(document, project, profile) == 1:
+        command = Str.concat(command, " --no-console")
+    print(@"[obin] building {project.name} ({profile})")
+    if options.verbose == 1:
+        print(@"       {command}")
+    code: i32 = obin_run_in_directory(command, project.root)
+    if code != 0:
+        print(@"obin: build failed with exit code {code}")
+        return code
+    g_obin_last_output = output
+    if options.no_tools == 0:
+        if obin_run_hooks(project, document, "after-build", options.verbose) != 0:
+            return 1
+    print(@"[obin] built {output}")
+    return 0
+
+fun obin_run(options: ObinOptions) -> i32:
+    code: i32 = obin_build(options)
+    if code != 0:
+        return code
+    command: str = Str.concat(obin_quote(g_obin_last_output), options.app_arguments)
+    print(@"[obin] running {g_obin_last_output}")
+    project: ObinProject = obin_require_project(options.manifest)
+    return obin_run_in_directory(command, project.root)
+
+fun obin_copy_assets(project: ObinProject, document: ObinToml, stage: str) -> i32:
+    roots: list<str> = obin_toml_array(document, "assets.roots")
+    if roots.size() == 0:
+        default_assets: str = obin_resolve_from(project.root, "assets")
+        if obin_is_directory(default_assets) == 1:
+            roots.append("assets")
+    if roots.size() == 0:
+        return 0
+    destination_root: str = PathOps.join_path(stage, project.asset_destination)
+    destination_root = PathOps.resolve_path(destination_root)
+    if obin_path_is_inside(destination_root, stage) == 0:
+        print("obin: assets.destination must resolve inside the package stage")
+        return 1
+    index: i64 = 0
+    while index < roots.size():
+        configured: str = roots.get_str(index)
+        source: str = obin_resolve_from(project.root, configured)
+        if PathOps.exists(source) == 0:
+            print(@"obin: asset root not found: {source}")
+            return 1
+        if obin_path_is_inside(stage, source) == 1:
+            print(@"obin: asset root cannot contain the package stage: {source}")
+            return 1
+        destination: str = destination_root
+        if roots.size() > 1:
+            destination = PathOps.join_path(destination_root, PathOps.get_filename(source))
+        if obin_copy_tree(source, destination) == 0:
+            print(@"obin: failed to copy assets from {source}")
+            return 1
+        index = index + 1
+    return 0
+
+fun obin_package(options: ObinOptions) -> i32:
+    project: ObinProject = obin_require_project(options.manifest)
+    if Memory.strlen(options.profile) == 0:
+        options.profile = "release"
+    code: i32 = obin_build(options)
+    if code != 0:
+        return code
+    document: ObinToml = obin_project_document(project)
+    package_root: str = obin_resolve_from(project.root, project.package_directory)
+    stage_name: str = Str.concat(project.name, Str.concat("-", project.version))
+    stage: str = PathOps.join_path(package_root, stage_name)
+    if obin_path_is_inside(stage, project.root) == 0:
+        print("obin: package.directory must resolve inside the project")
+        return 1
+    if PathOps.exists(stage) == 1:
+        if obin_remove_tree(stage) == 0:
+            print(@"obin: could not replace package directory {stage}")
+            return 1
+    if obin_ensure_directory(stage) == 0:
+        return 1
+    packaged_executable: str = PathOps.join_path(stage, PathOps.get_filename(g_obin_last_output))
+    if obin_copy_tree(g_obin_last_output, packaged_executable) == 0:
+        print("obin: failed to stage executable")
+        return 1
+    if project.include_assets == 1:
+        if obin_copy_assets(project, document, stage) != 0:
+            return 1
+    if options.no_tools == 0:
+        if obin_run_hooks(project, document, "after-package", options.verbose) != 0:
+            return 1
+    print(@"[obin] package ready: {stage}")
+    return 0
+
+fun obin_clean(manifest: str) -> i32:
+    project: ObinProject = obin_require_project(manifest)
+    targets: list<str> = []
+    targets.append(obin_resolve_from(project.root, "build"))
+    targets.append(obin_resolve_from(project.root, project.package_directory))
+    targets.append(obin_resolve_from(project.root, ".obin\\dependencies.state"))
+    index: i64 = 0
+    while index < targets.size():
+        target: str = targets.get_str(index)
+        if PathOps.exists(target) == 1:
+            if obin_path_is_inside(target, project.root) == 0:
+                print(@"obin: refused or failed to remove {target}")
+                return 1
+            if obin_remove_tree(target) == 0:
+                print(@"obin: refused or failed to remove {target}")
+                return 1
+        index = index + 1
+    print("[obin] clean complete (cached tools were preserved)")
+    return 0
+
+fun obin_doctor(manifest: str) -> i32:
+    project: ObinProject = obin_load_project(manifest)
+    obin_executable: str = PathOps.get_exe_path()
+    host_platform: str = PlatformInfo.name()
+    print("Obin doctor")
+    print(@"  executable : {obin_executable}")
+    print(@"  platform   : {host_platform}")
+    if project.valid == 0:
+        print(@"  manifest   : unavailable ({project.error})")
+        project = ObinProject()
+    else:
+        print(@"  manifest   : {project.manifest}")
+        print(@"  project    : {project.name} {project.version}")
+    configured_doletc: str = project.doletc
+    configured_dopm: str = project.dopm
+    if project.valid == 1 and Memory.strlen(configured_doletc) > 0:
+        local_doletc: str = obin_resolve_from(project.root, configured_doletc)
+        if PathOps.exists(local_doletc) == 1:
+            configured_doletc = local_doletc
+    if project.valid == 1 and Memory.strlen(configured_dopm) > 0:
+        local_dopm: str = obin_resolve_from(project.root, configured_dopm)
+        if PathOps.exists(local_dopm) == 1:
+            configured_dopm = local_dopm
+    doletc: str = obin_find_doletc(configured_doletc)
+    dopm: str = obin_find_dopm(configured_dopm)
+    if Memory.strlen(doletc) == 0:
+        print("  doletc     : NOT FOUND")
+    else:
+        print(@"  doletc     : {doletc}")
+    if Memory.strlen(dopm) == 0:
+        print("  dopm       : not installed (only required for dependencies)")
+    else:
+        print(@"  dopm       : {dopm}")
+    if project.valid == 1 and project.frog_enabled == 1:
+        source: str = obin_frog_find_cooker_source(doletc)
+        if Memory.strlen(source) == 0:
+            print("  frog       : cooker source NOT FOUND")
+            return 1
+        print(@"  frog       : {source}")
+    if Memory.strlen(doletc) == 0:
+        return 1
+    return 0
+
+fun obin_init(directory: str):
+    root: str = directory
+    if Memory.strlen(root) == 0:
+        root = PathOps.get_cwd()
+    root = PathOps.resolve_path(root)
+    if obin_ensure_directory(root) == 0:
+        obin_fail(@"could not create {root}")
+    manifest: str = PathOps.join_path(root, "obin.toml")
+    if PathOps.exists(manifest) == 1:
+        obin_fail(@"manifest already exists: {manifest}")
+    name: str = PathOps.get_filename(root)
+    if Memory.strlen(name) == 0 or obin_toml_valid_key(name) == 0 or Str.contains(name, "."):
+        name = "my-app"
+    content: str = Str.concat("[application]\nname = \"", name)
+    content = Str.concat(content, "\"\nversion = \"0.1.0\"\nentry = \"src/main.dlt\"\ntype = \"console\"\n\n")
+    content = Str.concat(content, "[build]\ntarget = \"windows\"\ndefault-profile = \"dev\"\nincremental = true\n\n")
+    content = Str.concat(content, "[profiles.dev]\noptimization = 0\nno-console = false\n\n[profiles.release]\noptimization = 3\nno-console = false\n\n")
+    content = Str.concat(content, "[packages]\nauto-sync = true\n\n[assets]\nroots = [\"assets\"]\ndestination = \"assets\"\n\n")
+    content = Str.concat(content, "[package]\ndirectory = \"dist\"\ninclude-assets = true\n")
+    if obin_write_text(manifest, content) == 0:
+        obin_fail("could not write obin.toml")
+    entry: str = PathOps.join_path(root, "src\\main.dlt")
+    if PathOps.exists(entry) == 0:
+        if obin_write_text(entry, "print(\"Hello from Dolet!\")\n") == 0:
+            obin_fail("could not write src/main.dlt")
+    assets: str = PathOps.join_path(root, "assets")
+    if obin_ensure_directory(assets) == 0:
+        obin_fail("could not create assets directory")
+    print(@"[obin] initialized {name} at {root}")
