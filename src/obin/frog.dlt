@@ -7,8 +7,8 @@ import json
 imm OBIN_FROG_MODEL_MAGIC: i32 = 0x4D475246
 imm OBIN_FROG_MODEL_VERSION: i32 = 2
 imm OBIN_FROG_TEXTURE_MAGIC: i32 = 0x58455446
-imm OBIN_FROG_TEXTURE_VERSION: i32 = 1
-imm OBIN_FROG_COOKER_PROTOCOL: i32 = 2
+imm OBIN_FROG_TEXTURE_VERSION: i32 = 2
+imm OBIN_FROG_COOKER_PROTOCOL: i32 = 3
 
 fun obin_frog_model_output(source: str) -> str:
     length: i64 = Memory.strlen(source)
@@ -50,23 +50,77 @@ fun obin_frog_texture_header_valid(path: str) -> i32:
     file: File = File.open_cwd(path, "r")
     if file.is_valid() == false:
         return 0
-    if file.get_size() < 32:
+    file_size: i64 = file.get_size()
+    if file_size < 64:
         file.close()
         return 0
-    header: i64 = Memory.malloc_zeroed(32)
-    count: i32 = file.read_bytes(header, 32)
-    file.close()
+    header: i64 = Memory.malloc_zeroed(64)
+    count: i32 = file.read_bytes(header, 64)
     valid: i32 = 0
-    if count == 32:
+    if count == 64:
         width: i32 = Memory.read_i32(header + 8)
         height: i32 = Memory.read_i32(header + 12)
-        data_size: i64 = Memory.read_i32(header + 28) as i64
-        expected: i64 = (width as i64) * (height as i64) * 4
+        format: i32 = Memory.read_i32(header + 16)
+        mip_count: i32 = Memory.read_i32(header + 24)
+        table_offset: i64 = Memory.read_i32(header + 32) as i64
+        entry_size: i32 = Memory.read_i32(header + 36)
+        data_offset: i64 = Memory.read_i32(header + 40) as i64
+        data_size: i64 = Memory.read_i32(header + 44) as i64
         if Memory.read_i32(header) == OBIN_FROG_TEXTURE_MAGIC and Memory.read_i32(header + 4) == OBIN_FROG_TEXTURE_VERSION:
-            if width > 0 and height > 0 and data_size == expected:
-                valid = 1
+            if width > 0 and height > 0 and format >= 1 and format <= 4 and mip_count > 0 and mip_count <= 32 and entry_size == 16:
+                table_size: i64 = (mip_count as i64) * 16
+                if table_offset >= 64 and table_offset + table_size <= data_offset and data_size > 0 and data_offset + data_size <= file_size:
+                    table: i64 = Memory.malloc_zeroed(table_size)
+                    file.seek(table_offset)
+                    table_read: i32 = file.read_bytes(table, table_size as i32)
+                    if table_read == (table_size as i32):
+                        expected_width: i32 = width
+                        expected_height: i32 = height
+                        expected_offset: i64 = 0
+                        level_valid: i32 = 1
+                        level: i32 = 0
+                        while level < mip_count:
+                            entry: i64 = table + (level as i64) * 16
+                            level_offset: i64 = Memory.read_i32(entry) as i64
+                            level_size: i64 = Memory.read_i32(entry + 4) as i64
+                            level_width: i32 = Memory.read_i32(entry + 8)
+                            level_height: i32 = Memory.read_i32(entry + 12)
+                            expected_size: i64 = (expected_width as i64) * (expected_height as i64) * 4
+                            if format != 1:
+                                block_size: i64 = 16
+                                if format == 4:
+                                    block_size = 8
+                                expected_size = (((expected_width + 3) / 4) as i64) * (((expected_height + 3) / 4) as i64) * block_size
+                            if level_offset != expected_offset or level_size != expected_size or level_width != expected_width or level_height != expected_height:
+                                level_valid = 0
+                            expected_offset = expected_offset + level_size
+                            if expected_width > 1:
+                                expected_width = expected_width / 2
+                            if expected_height > 1:
+                                expected_height = expected_height / 2
+                            level = level + 1
+                        if level_valid == 1 and expected_offset == data_size:
+                            valid = 1
+                    Memory.free(table)
+    file.close()
     Memory.free(header)
     return valid
+
+fun obin_frog_cooker_dependency_newer(source: str, cooker: str) -> i32:
+    cooker_stamp: i64 = obin_file_stamp(cooker)
+    source_directory: str = PathOps.get_directory(source)
+    dependencies: list<str> = []
+    dependencies.append(source)
+    dependencies.append(PathOps.join_path(source_directory, "frog_texture_cooker.dlt"))
+    dependencies.append(PathOps.join_path(source_directory, "frog_cooker_lib\mod.dlt"))
+    dependencies.append(PathOps.join_path(source_directory, "frog_cooker_lib\main.dlt"))
+    index: i64 = 0
+    while index < dependencies.size():
+        dependency: str = dependencies.get_str(index)
+        if PathOps.exists(dependency) == 1 and obin_file_stamp(dependency) > cooker_stamp:
+            return 1
+        index = index + 1
+    return 0
 
 fun obin_frog_find_cooker_source(doletc: str) -> str:
     compiler_directory: str = PathOps.get_directory(doletc)
@@ -95,7 +149,7 @@ fun obin_frog_ensure_cooker(project: ObinProject, doletc: str) -> str:
     if Memory.strlen(source) == 0:
         return ""
     rebuild: i32 = 0
-    if PathOps.exists(cooker) == 0 or obin_file_stamp(source) > obin_file_stamp(cooker) or obin_file_stamp(doletc) > obin_file_stamp(cooker):
+    if PathOps.exists(cooker) == 0 or obin_frog_cooker_dependency_newer(source, cooker) == 1 or obin_file_stamp(doletc) > obin_file_stamp(cooker):
         rebuild = 1
     if rebuild == 0:
         protocol_command: str = Str.concat(obin_quote(cooker), " --protocol")
@@ -314,6 +368,38 @@ fun obin_frog_texture_stale(source: str, output: str, cooker: str, force: i32) -
         return 1
     return 0
 
+fun obin_frog_texture_matches(source_lower: str, document: ObinToml, key: str) -> i32:
+    patterns: list<str> = obin_toml_array(document, key)
+    index: i64 = 0
+    while index < patterns.size():
+        pattern: str = Str.to_lower(patterns.get_str(index))
+        if Memory.strlen(pattern) > 0 and Str.contains(source_lower, pattern):
+            return 1
+        index = index + 1
+    return 0
+
+fun obin_frog_texture_kind(source: str, document: ObinToml) -> str:
+    lower: str = Str.to_lower(source)
+    if obin_frog_texture_matches(lower, document, "tool.frog.texture-lossless-patterns") == 1:
+        return "lossless"
+    if obin_frog_texture_matches(lower, document, "tool.frog.texture-normal-patterns") == 1:
+        return "normal"
+    if obin_frog_texture_matches(lower, document, "tool.frog.texture-metallic-roughness-patterns") == 1:
+        return "metallic-roughness"
+    if obin_frog_texture_matches(lower, document, "tool.frog.texture-occlusion-patterns") == 1:
+        return "occlusion"
+    if obin_frog_texture_matches(lower, document, "tool.frog.texture-data-patterns") == 1:
+        return "data"
+    if obin_frog_texture_matches(lower, document, "tool.frog.texture-color-patterns") == 1:
+        return "color"
+    if Str.contains(lower, "normal"):
+        return "normal"
+    if Str.contains(lower, "metallicroughness") or Str.contains(lower, "metallic_roughness") or Str.contains(lower, "metallic-roughness"):
+        return "metallic-roughness"
+    if Str.contains(lower, "occlusion") or Str.contains(lower, "ambientocclusion") or Str.contains(lower, "_ao.") or Str.contains(lower, "_ao_"):
+        return "occlusion"
+    return "color"
+
 fun obin_frog_cook(project: ObinProject, document: ObinToml, doletc: str, force: i32) -> i32:
     if project.frog_enabled == 0:
         return 0
@@ -365,6 +451,8 @@ fun obin_frog_cook(project: ObinProject, document: ObinToml, doletc: str, force:
         if obin_frog_texture_stale(texture_source, texture_output, cooker, force) == 1:
             print(@"[obin:frog] cooking texture {texture_source}")
             texture_command: str = Str.concat(obin_quote(cooker), Str.concat(" ", obin_quote(texture_source)))
+            texture_kind: str = obin_frog_texture_kind(texture_source, document)
+            texture_command = Str.concat(texture_command, Str.concat(" --texture-kind ", obin_quote(texture_kind)))
             if obin_run_in_directory(texture_command, project.root) != 0:
                 return 1
             texture_cooked = texture_cooked + 1

@@ -67,6 +67,13 @@ cook-models = true
 cook-textures = true
 texture-roots = ["assets/textures"]
 texture-excludes = ["@channels="]
+# Optional type overrides; common names are inferred automatically.
+texture-normal-patterns = ["_n.png", "normal.png"]
+texture-metallic-roughness-patterns = ["metallicRoughness.png"]
+texture-occlusion-patterns = ["_ao.png"]
+texture-data-patterns = ["lookup/"]
+texture-color-patterns = ["albedo/"]
+texture-lossless-patterns = ["ui/pixel-art/"]
 # keep-source-textures = true # optional PNG fallback inside release packages
 lods = [0.45, 0.22]
 # cooker = "tools/custom-frog-cooker.exe"
@@ -101,7 +108,11 @@ and `.png` files, checks source inputs, cooker protocol, format versions, and
 timestamps, and cooks only stale assets. Static PNG literals are discovered by
 default. `texture-roots` adds dynamically selected texture directories;
 `texture-excludes` skips matching paths. Set `cook-literal-textures = false` to
-cook only explicit texture roots. Frog prefers adjacent `.frogmodel` and
-`.frogtex` files at runtime and retains source-file fallbacks for development.
-Release packages omit a PNG only when its adjacent `.frogtex` passes format
-validation; set `keep-source-textures = true` to ship both copies.
+cook only explicit texture roots. Type-specific patterns override filename
+inference when an asset has an ambiguous name. FrogTexture v2 stores GPU-native
+BC7/BC5/BC4 (or explicit lossless RGBA8) plus a complete offline mip chain;
+Obin validates its header and every mip entry before treating it as current.
+Frog prefers adjacent `.frogmodel` and `.frogtex` files at runtime and retains
+source-file fallbacks for development. Release packages omit a PNG only when
+its adjacent `.frogtex` passes validation; set `keep-source-textures = true` to
+ship both copies for hardware that lacks the selected compressed format.
