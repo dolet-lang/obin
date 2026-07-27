@@ -111,7 +111,9 @@ default. `texture-roots` adds dynamically selected texture directories;
 cook only explicit texture roots. Type-specific patterns override filename
 inference when an asset has an ambiguous name. FrogTexture v2 stores GPU-native
 BC7/BC5/BC4 (or explicit lossless RGBA8) plus a complete offline mip chain;
-Obin validates its header and every mip entry before treating it as current.
+Obin validates its header, every mip entry, and the configured texture recipe
+before treating it as current. Changing a texture pattern therefore recooks
+older outputs automatically without requiring `--force`.
 Frog prefers adjacent `.frogmodel` and `.frogtex` files at runtime and retains
 source-file fallbacks for development. Release packages omit a PNG only when
 its adjacent `.frogtex` passes validation; set `keep-source-textures = true` to
