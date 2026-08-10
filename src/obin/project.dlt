@@ -15,6 +15,7 @@ struct ObinProject:
     doletc: str = ""
     dopm: str = ""
     package_directory: str = "dist"
+    package_executable_directory: str = ""
     asset_destination: str = "assets"
     incremental: i32 = 1
     auto_sync: i32 = 1
@@ -179,6 +180,7 @@ fun obin_load_project(manifest_hint: str) -> ObinProject:
     project.dopm = obin_toml_get_str(document, "tools.dopm", "")
     project.auto_sync = obin_toml_get_bool(document, "packages.auto-sync", 1)
     project.package_directory = obin_toml_get_str(document, "package.directory", "dist")
+    project.package_executable_directory = obin_toml_get_str(document, "package.executable-directory", "")
     project.include_assets = obin_toml_get_bool(document, "package.include-assets", 1)
     project.asset_destination = obin_toml_get_str(document, "assets.destination", "assets")
     project.frog_enabled = obin_toml_get_bool(document, "tool.frog.enabled", 0)
@@ -204,6 +206,12 @@ fun obin_load_project(manifest_hint: str) -> ObinProject:
 
 fun obin_project_document(project: ObinProject) -> ObinToml:
     return obin_toml_parse_file(project.manifest)
+
+fun obin_project_targets(document: ObinToml) -> list<str>:
+    # A matrix is explicit so its order is stable and auxiliary target keys do
+    # not accidentally become build entries. Single-target projects do not
+    # need this key; it is only required by --all-targets.
+    return obin_toml_array(document, "build.targets")
 
 fun obin_profile_optimization(document: ObinToml, profile: str) -> i32:
     key: str = Str.concat("profiles.", Str.concat(profile, ".optimization"))

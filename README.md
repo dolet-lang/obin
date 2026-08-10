@@ -38,6 +38,7 @@ type = "game" # console, gui, or game
 default-target = "windows"
 default-profile = "dev"
 incremental = true
+targets = ["windows", "linux"] # ordered matrix used by --all-targets
 
 [targets.windows]
 triple = "windows/x86_64-msvc"
@@ -92,6 +93,8 @@ lods = [0.45, 0.22]
 [package]
 directory = "dist"
 include-assets = true
+executable-directory = "bin" # optional
+include = ["LICENSE", "config"] # optional project-relative SDK/runtime files
 ```
 
 Dependency version strings are recorded by Obin, but the current DOPM source
@@ -102,9 +105,9 @@ as supported and avoids rerunning DOPM until the dependency declaration changes.
 ## Commands
 
 - `obin init [directory]`
-- `obin build [manifest] [--profile name] [--target name] [--out path]`
+- `obin build [manifest] [--profile name] [--target name | --all-targets] [--out path]`
 - `obin run [manifest] [build options] [-- application arguments]`
-- `obin package [manifest]` (uses the `release` profile by default)
+- `obin package [manifest] [--target name | --all-targets]` (uses the `release` profile by default)
 - `obin clean [manifest]`
 - `obin doctor [manifest]`
 
@@ -114,6 +117,19 @@ Target names are project aliases. `obin build --target linux` resolves
 are named `<application>-<version>-<target>` so different operating-system
 builds never overwrite each other. A canonical target may also be passed
 directly to `--target`.
+
+`--all-targets` builds the aliases in `build.targets` sequentially and stops on
+the first failure. Sequential execution is intentional: compiler and asset
+toolchains can be memory-heavy, and deterministic logs are more useful than
+oversubscribing the host. `--target`, `--out`, and `--all-targets` cannot be
+combined.
+
+`package.include` stages project-relative files or trees at the same relative
+path. VCS metadata, hidden cache directories, `.obin`, and `node_modules` are
+excluded, and includes are forbidden from escaping either the project or the
+package stage. A target may add files with
+`targets.<alias>.package-include`. `package.executable-directory` places the
+program under a subdirectory such as `bin/`, which is useful for SDK layouts.
 
 `clean` is restricted to paths inside the project root. The Frog adapter builds
 the pure-Dolet cooker into `.obin/tools`, discovers referenced `.gltf`, `.glb`,

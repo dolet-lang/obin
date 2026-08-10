@@ -13,6 +13,7 @@ struct ObinOptions:
     no_dependencies: i32 = 0
     no_tools: i32 = 0
     verbose: i32 = 0
+    all_targets: i32 = 0
 
 g_obin_last_output: str = ""
 g_obin_last_target_alias: str = ""
@@ -23,7 +24,7 @@ fun obin_fail(message: str):
     Process.exit(1)
 
 fun obin_version() -> str:
-    return "0.2.0"
+    return "0.3.0"
 
 fun obin_print_version():
     print(Str.concat("obin ", obin_version()))
@@ -42,6 +43,7 @@ fun obin_print_help():
     print("Build options:")
     print("  --profile <name>    Select a manifest profile")
     print("  --target <name>     Select a [targets.<name>] alias or canonical target")
+    print("  --all-targets       Build every alias listed in build.targets")
     print("  --out, -o <path>    Override the executable path")
     print("  --compiler <path>   Override doletc")
     print("  --force             Rebuild and recook assets")
@@ -71,6 +73,8 @@ fun obin_parse_options(start: i32, allow_app_arguments: i32) -> ObinOptions:
             if index >= Argv.count():
                 obin_fail("--target requires a name")
             options.target = Argv.get(index)
+        elif Str.equals(argument, "--all-targets"):
+            options.all_targets = 1
         elif Str.equals(argument, "--out") or Str.equals(argument, "-o"):
             index = index + 1
             if index >= Argv.count():
@@ -188,7 +192,7 @@ fun obin_sources_newer(project: ObinProject, output: str, doletc: str) -> i32:
         index = index + 1
     return 0
 
-fun obin_build(options: ObinOptions) -> i32:
+fun obin_build_one(options: ObinOptions) -> i32:
     project: ObinProject = obin_require_project(options.manifest)
     document: ObinToml = obin_project_document(project)
     profile: str = options.profile
@@ -257,7 +261,51 @@ fun obin_build(options: ObinOptions) -> i32:
     print(@"[obin] built {output}")
     return 0
 
+fun obin_matrix_options_valid(options: ObinOptions) -> i32:
+    if Memory.strlen(options.target) > 0:
+        print("obin: --target and --all-targets cannot be used together")
+        return 0
+    if Memory.strlen(options.output) > 0:
+        print("obin: --out cannot be used with --all-targets because every target has its own artifact")
+        return 0
+    return 1
+
+fun obin_build_all(options: ObinOptions) -> i32:
+    if obin_matrix_options_valid(options) == 0:
+        return 1
+    project: ObinProject = obin_require_project(options.manifest)
+    document: ObinToml = obin_project_document(project)
+    targets: list<str> = obin_project_targets(document)
+    if targets.size() == 0:
+        print("obin: --all-targets requires build.targets = [\"alias\", ...]")
+        return 1
+    target_count: i64 = targets.size()
+    print(@"[obin] building target matrix ({target_count} targets)")
+    index: i64 = 0
+    while index < targets.size():
+        selected: str = targets.get_str(index)
+        target: ObinTarget = obin_target_from(document, selected)
+        if target.valid == 0:
+            print(@"obin: invalid build.targets entry '{selected}': {target.error}")
+            return 1
+        child: ObinOptions = options
+        child.all_targets = 0
+        child.target = selected
+        if obin_build_one(child) != 0:
+            return 1
+        index = index + 1
+    print(@"[obin] target matrix complete ({target_count} targets)")
+    return 0
+
+fun obin_build(options: ObinOptions) -> i32:
+    if options.all_targets == 1:
+        return obin_build_all(options)
+    return obin_build_one(options)
+
 fun obin_run(options: ObinOptions) -> i32:
+    if options.all_targets == 1:
+        print("obin: run accepts one target; use build or package with --all-targets")
+        return 1
     code: i32 = obin_build(options)
     if code != 0:
         return code
@@ -334,7 +382,63 @@ fun obin_copy_assets(project: ObinProject, document: ObinToml, stage: str) -> i3
         index = index + 1
     return 0
 
-fun obin_package(options: ObinOptions) -> i32:
+fun obin_copy_package_tree(source: str, destination: str) -> i32:
+    if PathOps.exists(source) == 0:
+        return 0
+    if obin_is_directory(source) == 0:
+        directory: str = PathOps.get_directory(destination)
+        if obin_ensure_directory(directory) == 0:
+            return 0
+        return CopyFileA(source, destination, 0)
+    if obin_is_reparse_point(source) == 1:
+        return 0
+    if obin_ensure_directory(destination) == 0:
+        return 0
+    names: list<str> = Dir.list(source)
+    index: i64 = 0
+    while index < names.size():
+        name: str = names.get_str(index)
+        source_child: str = PathOps.join_path(source, name)
+        if obin_is_directory(source_child) == 0 or obin_skip_directory(name) == 0:
+            destination_child: str = PathOps.join_path(destination, name)
+            if obin_copy_package_tree(source_child, destination_child) == 0:
+                return 0
+        index = index + 1
+    return 1
+
+fun obin_copy_package_include_list(project: ObinProject, includes: list<str>, stage: str) -> i32:
+    index: i64 = 0
+    while index < includes.size():
+        configured: str = includes.get_str(index)
+        if Memory.strlen(configured) == 0 or PathOps.is_absolute(configured):
+            print(@"obin: package include must be a non-empty project-relative path: {configured}")
+            return 1
+        source: str = obin_resolve_from(project.root, configured)
+        if obin_path_is_inside(source, project.root) == 0:
+            print(@"obin: package include escapes the project root: {configured}")
+            return 1
+        if PathOps.exists(source) == 0:
+            print(@"obin: package include not found: {source}")
+            return 1
+        destination: str = PathOps.resolve_path(PathOps.join_path(stage, configured))
+        if obin_path_is_inside(destination, stage) == 0:
+            print(@"obin: package include escapes the package stage: {configured}")
+            return 1
+        if obin_copy_package_tree(source, destination) == 0:
+            print(@"obin: failed to package {source}")
+            return 1
+        index = index + 1
+    return 0
+
+fun obin_copy_package_includes(project: ObinProject, document: ObinToml, stage: str, target_alias: str) -> i32:
+    common: list<str> = obin_toml_array(document, "package.include")
+    if obin_copy_package_include_list(project, common, stage) != 0:
+        return 1
+    target_key: str = Str.concat("targets.", Str.concat(target_alias, ".package-include"))
+    target_specific: list<str> = obin_toml_array(document, target_key)
+    return obin_copy_package_include_list(project, target_specific, stage)
+
+fun obin_package_one(options: ObinOptions) -> i32:
     project: ObinProject = obin_require_project(options.manifest)
     if Memory.strlen(options.profile) == 0:
         options.profile = "release"
@@ -354,18 +458,60 @@ fun obin_package(options: ObinOptions) -> i32:
             return 1
     if obin_ensure_directory(stage) == 0:
         return 1
-    packaged_executable: str = PathOps.join_path(stage, PathOps.get_filename(g_obin_last_output))
+    executable_root: str = stage
+    if Memory.strlen(project.package_executable_directory) > 0:
+        executable_root = obin_resolve_from(stage, project.package_executable_directory)
+        if obin_path_is_inside(executable_root, stage) == 0:
+            print("obin: package.executable-directory must resolve inside the package stage")
+            return 1
+        if obin_ensure_directory(executable_root) == 0:
+            return 1
+    packaged_executable: str = PathOps.join_path(executable_root, PathOps.get_filename(g_obin_last_output))
     if obin_copy_tree(g_obin_last_output, packaged_executable) == 0:
         print("obin: failed to stage executable")
         return 1
     if project.include_assets == 1:
         if obin_copy_assets(project, document, stage) != 0:
             return 1
+    if obin_copy_package_includes(project, document, stage, g_obin_last_target_alias) != 0:
+        return 1
     if options.no_tools == 0:
         if obin_run_hooks(project, document, "after-package", options.verbose) != 0:
             return 1
     print(@"[obin] package ready: {stage}")
     return 0
+
+fun obin_package_all(options: ObinOptions) -> i32:
+    if obin_matrix_options_valid(options) == 0:
+        return 1
+    project: ObinProject = obin_require_project(options.manifest)
+    document: ObinToml = obin_project_document(project)
+    targets: list<str> = obin_project_targets(document)
+    if targets.size() == 0:
+        print("obin: --all-targets requires build.targets = [\"alias\", ...]")
+        return 1
+    target_count: i64 = targets.size()
+    print(@"[obin] packaging target matrix ({target_count} targets)")
+    index: i64 = 0
+    while index < targets.size():
+        selected: str = targets.get_str(index)
+        target: ObinTarget = obin_target_from(document, selected)
+        if target.valid == 0:
+            print(@"obin: invalid build.targets entry '{selected}': {target.error}")
+            return 1
+        child: ObinOptions = options
+        child.all_targets = 0
+        child.target = selected
+        if obin_package_one(child) != 0:
+            return 1
+        index = index + 1
+    print(@"[obin] package matrix complete ({target_count} targets)")
+    return 0
+
+fun obin_package(options: ObinOptions) -> i32:
+    if options.all_targets == 1:
+        return obin_package_all(options)
+    return obin_package_one(options)
 
 fun obin_clean(manifest: str) -> i32:
     project: ObinProject = obin_require_project(manifest)
@@ -451,7 +597,7 @@ fun obin_init(directory: str):
         name = "my-app"
     content: str = Str.concat("[application]\nname = \"", name)
     content = Str.concat(content, "\"\nversion = \"0.1.0\"\nentry = \"src/main.dlt\"\ntype = \"console\"\n\n")
-    content = Str.concat(content, "[build]\ndefault-target = \"windows\"\ndefault-profile = \"dev\"\nincremental = true\n\n")
+    content = Str.concat(content, "[build]\ndefault-target = \"windows\"\ndefault-profile = \"dev\"\nincremental = true\ntargets = [\"windows\", \"linux\"]\n\n")
     content = Str.concat(content, "[targets.windows]\ntriple = \"windows/x86_64-msvc\"\n\n[targets.linux]\ntriple = \"linux/x86_64-musl\"\n\n")
     content = Str.concat(content, "[profiles.dev]\noptimization = 0\nno-console = false\n\n[profiles.release]\noptimization = 3\nno-console = false\n\n")
     content = Str.concat(content, "[packages]\nauto-sync = true\n\n[assets]\nroots = [\"assets\"]\ndestination = \"assets\"\n\n")
