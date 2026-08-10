@@ -15,13 +15,18 @@ struct ObinOptions:
     verbose: i32 = 0
 
 g_obin_last_output: str = ""
+g_obin_last_target_alias: str = ""
+g_obin_last_target_os: str = ""
 
 fun obin_fail(message: str):
     print(@"obin: {message}")
     Process.exit(1)
 
+fun obin_version() -> str:
+    return "0.2.0"
+
 fun obin_print_version():
-    print("obin 0.1.0")
+    print(Str.concat("obin ", obin_version()))
 
 fun obin_print_help():
     print("Obin - application tooling for the Dolet language")
@@ -36,7 +41,7 @@ fun obin_print_help():
     print("")
     print("Build options:")
     print("  --profile <name>    Select a manifest profile")
-    print("  --target <name>     Override the compiler target")
+    print("  --target <name>     Select a [targets.<name>] alias or canonical target")
     print("  --out, -o <path>    Override the executable path")
     print("  --compiler <path>   Override doletc")
     print("  --force             Rebuild and recook assets")
@@ -204,10 +209,19 @@ fun obin_build(options: ObinOptions) -> i32:
     if Memory.strlen(doletc) == 0:
         print("obin: doletc was not found; set tools.doletc, OBIN_DOLETC, or PATH")
         return 1
-    output: str = obin_project_output(project, profile, options.output)
-    target: str = options.target
-    if Memory.strlen(target) == 0:
-        target = project.target
+    target_selector: str = options.target
+    if Memory.strlen(target_selector) == 0:
+        target_selector = project.target
+    target: ObinTarget = obin_target_from(document, target_selector)
+    if target.valid == 0:
+        print(@"obin: {target.error}")
+        return 1
+    output: str = obin_project_output(project, document, target, profile, options.output)
+    # Preserve target identity even when the incremental path returns early;
+    # run/package consume this state after obin_build completes.
+    g_obin_last_output = output
+    g_obin_last_target_alias = target.alias
+    g_obin_last_target_os = target.os
     if options.no_dependencies == 0:
         if obin_sync_dependencies(project, document, options.force) != 0:
             return 1
@@ -220,7 +234,6 @@ fun obin_build(options: ObinOptions) -> i32:
         if options.force == 0:
             if obin_sources_newer(project, output, doletc) == 0:
                 print(@"[obin] up to date: {output}")
-                g_obin_last_output = output
                 return 0
     if obin_ensure_directory(PathOps.get_directory(output)) == 0:
         print(@"obin: could not create output directory for {output}")
@@ -228,18 +241,16 @@ fun obin_build(options: ObinOptions) -> i32:
     optimization: i32 = obin_profile_optimization(document, profile)
     optimization_flag: str = Str.concat(" -O", Convert.i32_to_str(optimization))
     command: str = Str.concat(obin_quote(doletc), Str.concat(" ", Str.concat(obin_quote(entry), Str.concat(" -o ", Str.concat(obin_quote(output), optimization_flag)))))
-    if Memory.strlen(target) > 0:
-        command = Str.concat(command, Str.concat(" --target ", obin_quote(target)))
+    command = Str.concat(command, Str.concat(" --target ", obin_quote(target.triple)))
     if obin_profile_no_console(document, project, profile) == 1:
         command = Str.concat(command, " --no-console")
-    print(@"[obin] building {project.name} ({profile})")
+    print(@"[obin] building {project.name} ({profile}, {target.alias} -> {target.triple})")
     if options.verbose == 1:
         print(@"       {command}")
     code: i32 = obin_run_in_directory(command, project.root)
     if code != 0:
         print(@"obin: build failed with exit code {code}")
         return code
-    g_obin_last_output = output
     if options.no_tools == 0:
         if obin_run_hooks(project, document, "after-build", options.verbose) != 0:
             return 1
@@ -250,6 +261,11 @@ fun obin_run(options: ObinOptions) -> i32:
     code: i32 = obin_build(options)
     if code != 0:
         return code
+    host: str = Str.to_lower(PlatformInfo.name())
+    if Str.equals(host, g_obin_last_target_os) == false:
+        print(@"obin: cannot run a {g_obin_last_target_os} artifact on the {host} host")
+        print("      the artifact was built successfully; run it on its target system")
+        return 1
     command: str = Str.concat(obin_quote(g_obin_last_output), options.app_arguments)
     print(@"[obin] running {g_obin_last_output}")
     project: ObinProject = obin_require_project(options.manifest)
@@ -327,7 +343,7 @@ fun obin_package(options: ObinOptions) -> i32:
         return code
     document: ObinToml = obin_project_document(project)
     package_root: str = obin_resolve_from(project.root, project.package_directory)
-    stage_name: str = Str.concat(project.name, Str.concat("-", project.version))
+    stage_name: str = Str.concat(project.name, Str.concat("-", Str.concat(project.version, Str.concat("-", g_obin_last_target_alias))))
     stage: str = PathOps.join_path(package_root, stage_name)
     if obin_path_is_inside(stage, project.root) == 0:
         print("obin: package.directory must resolve inside the project")
@@ -384,6 +400,12 @@ fun obin_doctor(manifest: str) -> i32:
     else:
         print(@"  manifest   : {project.manifest}")
         print(@"  project    : {project.name} {project.version}")
+        document: ObinToml = obin_project_document(project)
+        selected: ObinTarget = obin_target_from(document, project.target)
+        if selected.valid == 1:
+            print(@"  target     : {selected.alias} -> {selected.triple}")
+        else:
+            print(@"  target     : INVALID ({selected.error})")
     configured_doletc: str = project.doletc
     configured_dopm: str = project.dopm
     if project.valid == 1 and Memory.strlen(configured_doletc) > 0:
@@ -429,7 +451,8 @@ fun obin_init(directory: str):
         name = "my-app"
     content: str = Str.concat("[application]\nname = \"", name)
     content = Str.concat(content, "\"\nversion = \"0.1.0\"\nentry = \"src/main.dlt\"\ntype = \"console\"\n\n")
-    content = Str.concat(content, "[build]\ntarget = \"windows\"\ndefault-profile = \"dev\"\nincremental = true\n\n")
+    content = Str.concat(content, "[build]\ndefault-target = \"windows\"\ndefault-profile = \"dev\"\nincremental = true\n\n")
+    content = Str.concat(content, "[targets.windows]\ntriple = \"windows/x86_64-msvc\"\n\n[targets.linux]\ntriple = \"linux/x86_64-musl\"\n\n")
     content = Str.concat(content, "[profiles.dev]\noptimization = 0\nno-console = false\n\n[profiles.release]\noptimization = 3\nno-console = false\n\n")
     content = Str.concat(content, "[packages]\nauto-sync = true\n\n[assets]\nroots = [\"assets\"]\ndestination = \"assets\"\n\n")
     content = Str.concat(content, "[package]\ndirectory = \"dist\"\ninclude-assets = true\n")

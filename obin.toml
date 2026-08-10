@@ -1,13 +1,19 @@
 [application]
 name = "obin"
-version = "0.1.0"
+version = "0.2.0"
 entry = "src/main.dlt"
 type = "console"
 
 [build]
-target = "windows"
+default-target = "windows"
 default-profile = "release"
 incremental = true
+
+[targets.windows]
+triple = "windows/x86_64-msvc"
+
+[targets.linux]
+triple = "linux/x86_64-musl"
 
 [profiles.dev]
 optimization = 0

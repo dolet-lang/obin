@@ -35,9 +35,15 @@ entry = "src/main.dlt"
 type = "game" # console, gui, or game
 
 [build]
-target = "windows"
+default-target = "windows"
 default-profile = "dev"
 incremental = true
+
+[targets.windows]
+triple = "windows/x86_64-msvc"
+
+[targets.linux]
+triple = "linux/x86_64-musl"
 
 [profiles.dev]
 optimization = 0
@@ -101,6 +107,13 @@ as supported and avoids rerunning DOPM until the dependency declaration changes.
 - `obin package [manifest]` (uses the `release` profile by default)
 - `obin clean [manifest]`
 - `obin doctor [manifest]`
+
+Target names are project aliases. `obin build --target linux` resolves
+`targets.linux.triple` and passes the canonical `linux/x86_64-musl` target to
+`doletc`. Artifacts are isolated under `build/<target>/<profile>/`, and packages
+are named `<application>-<version>-<target>` so different operating-system
+builds never overwrite each other. A canonical target may also be passed
+directly to `--target`.
 
 `clean` is restricted to paths inside the project root. The Frog adapter builds
 the pure-Dolet cooker into `.obin/tools`, discovers referenced `.gltf`, `.glb`,

@@ -189,7 +189,10 @@ fun obin_frog_ensure_cooker(project: ObinProject, doletc: str) -> str:
     tools_directory: str = obin_resolve_from(project.root, ".obin\\tools")
     if obin_ensure_directory(tools_directory) == 0:
         return ""
-    cooker: str = PathOps.join_path(tools_directory, "frog-cooker.exe")
+    cooker_name: str = "frog-cooker"
+    if Str.equals(PlatformInfo.name(), "windows"):
+        cooker_name = "frog-cooker.exe"
+    cooker: str = PathOps.join_path(tools_directory, cooker_name)
     source: str = obin_frog_find_cooker_source(doletc)
     if Memory.strlen(source) == 0:
         return ""
@@ -203,7 +206,12 @@ fun obin_frog_ensure_cooker(project: ObinProject, doletc: str) -> str:
             rebuild = 1
     if rebuild == 1:
         print("[obin:frog] building the cooker from Dolet source")
-        command: str = Str.concat(obin_quote(doletc), Str.concat(" ", Str.concat(obin_quote(source), Str.concat(" -o ", Str.concat(obin_quote(cooker), " -O3 --target windows")))))
+        # The cooker is a build-host tool. Compile it for the host's canonical
+        # target, independently from the application's selected output target.
+        # This keeps cross-builds runnable (for example, a Windows host cooking
+        # assets while producing a Linux application).
+        host_target: str = PlatformInfo.default_target()
+        command: str = Str.concat(obin_quote(doletc), Str.concat(" ", Str.concat(obin_quote(source), Str.concat(" -o ", Str.concat(obin_quote(cooker), Str.concat(" -O3 --target ", obin_quote(host_target)))))))
         if obin_run_in_directory(command, project.root) != 0:
             return ""
     return cooker

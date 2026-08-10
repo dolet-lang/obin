@@ -28,6 +28,14 @@ struct ObinProject:
     valid: i32 = 0
     error: str = ""
 
+struct ObinTarget:
+    alias: str = ""
+    triple: str = ""
+    os: str = ""
+    artifact_suffix: str = ""
+    valid: i32 = 0
+    error: str = ""
+
 fun obin_project_error(project: ObinProject, message: str) -> ObinProject:
     project.valid = 0
     project.error = message
@@ -84,9 +92,67 @@ fun obin_discover_manifest(hint: str) -> str:
         depth = depth + 1
     return ""
 
-fun obin_project_default_output(project: ObinProject, profile: str) -> str:
-    filename: str = Str.concat(project.name, ".exe")
-    return PathOps.join_path("build", PathOps.join_path(profile, filename))
+fun obin_target_error(target: ObinTarget, message: str) -> ObinTarget:
+    target.valid = 0
+    target.error = message
+    return target
+
+fun obin_target_safe_component(value: str) -> i32:
+    if Memory.strlen(value) == 0 or obin_toml_valid_key(value) == 0:
+        return 0
+    if Str.contains(value, "."):
+        return 0
+    return 1
+
+fun obin_target_parse_triple(target: ObinTarget) -> ObinTarget:
+    slash: i64 = Str.index_of(target.triple, "/")
+    length: i64 = Memory.strlen(target.triple)
+    if slash <= 0 or slash >= length - 1:
+        return obin_target_error(target, @"target triple must be os/arch-abi: {target.triple}")
+    target.os = Str.to_lower(Str.substring(target.triple, 0, slash))
+    variant: str = Str.to_lower(Str.substring(target.triple, slash + 1, length))
+    if Str.contains(variant, "/"):
+        return obin_target_error(target, @"target triple must contain exactly one '/': {target.triple}")
+    if obin_target_safe_component(target.os) == 0 or obin_target_safe_component(variant) == 0:
+        return obin_target_error(target, @"target triple contains unsafe components: {target.triple}")
+    target.triple = Str.concat(target.os, Str.concat("/", variant))
+    return target
+
+fun obin_target_from(document: ObinToml, selected: str) -> ObinTarget:
+    target: ObinTarget = ObinTarget()
+    target.alias = selected
+    if Memory.strlen(selected) == 0:
+        return obin_target_error(target, "no build target was selected")
+    if Str.contains(selected, "/"):
+        target.triple = Str.to_lower(selected)
+        target = obin_target_parse_triple(target)
+        if target.valid == 0 and Memory.strlen(target.error) > 0:
+            return target
+        variant: str = Str.substring(target.triple, Str.index_of(target.triple, "/") + 1, Memory.strlen(target.triple))
+        target.alias = Str.concat(target.os, Str.concat("-", variant))
+    else:
+        if obin_target_safe_component(selected) == 0:
+            return obin_target_error(target, @"invalid target alias: {selected}")
+        key: str = Str.concat("targets.", Str.concat(selected, ".triple"))
+        target.triple = Str.to_lower(obin_toml_get_str(document, key, ""))
+        # Compatibility for manifests created before target tables existed.
+        if Memory.strlen(target.triple) == 0 and Str.equals(Str.to_lower(selected), "windows"):
+            target.triple = "windows/x86_64-msvc"
+        if Memory.strlen(target.triple) == 0 and Str.equals(Str.to_lower(selected), "linux"):
+            target.triple = "linux/x86_64-gnu"
+        if Memory.strlen(target.triple) == 0:
+            return obin_target_error(target, @"target alias '{selected}' has no targets.{selected}.triple")
+        target = obin_target_parse_triple(target)
+        if Memory.strlen(target.error) > 0:
+            return target
+    if Str.equals(target.os, "windows"):
+        target.artifact_suffix = ".exe"
+    target.valid = 1
+    return target
+
+fun obin_project_default_output(project: ObinProject, target: ObinTarget, profile: str) -> str:
+    filename: str = Str.concat(project.name, target.artifact_suffix)
+    return PathOps.join_path("build", PathOps.join_path(target.alias, PathOps.join_path(profile, filename)))
 
 fun obin_load_project(manifest_hint: str) -> ObinProject:
     project: ObinProject = ObinProject()
@@ -104,7 +170,9 @@ fun obin_load_project(manifest_hint: str) -> ObinProject:
     project.entry = obin_toml_get_str(document, "application.entry", "src/main.dlt")
     project.kind = Str.to_lower(obin_toml_get_str(document, "application.type", "console"))
     project.output = obin_toml_get_str(document, "build.output", "")
-    project.target = obin_toml_get_str(document, "build.target", "windows")
+    project.target = obin_toml_get_str(document, "build.default-target", "")
+    if Memory.strlen(project.target) == 0:
+        project.target = obin_toml_get_str(document, "build.target", "windows")
     project.default_profile = obin_toml_get_str(document, "build.default-profile", "dev")
     project.incremental = obin_toml_get_bool(document, "build.incremental", 1)
     project.doletc = obin_toml_get_str(document, "tools.doletc", "")
@@ -159,10 +227,13 @@ fun obin_profile_no_console(document: ObinToml, project: ObinProject, profile: s
 fun obin_project_entry(project: ObinProject) -> str:
     return obin_resolve_from(project.root, project.entry)
 
-fun obin_project_output(project: ObinProject, profile: str, override: str) -> str:
+fun obin_project_output(project: ObinProject, document: ObinToml, target: ObinTarget, profile: str, override: str) -> str:
     selected: str = override
+    if Memory.strlen(selected) == 0:
+        target_output_key: str = Str.concat("targets.", Str.concat(target.alias, ".output"))
+        selected = obin_toml_get_str(document, target_output_key, "")
     if Memory.strlen(selected) == 0:
         selected = project.output
     if Memory.strlen(selected) == 0:
-        selected = obin_project_default_output(project, profile)
+        selected = obin_project_default_output(project, target, profile)
     return obin_resolve_from(project.root, selected)
