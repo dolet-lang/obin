@@ -41,10 +41,10 @@ incremental = true
 targets = ["windows", "linux"] # ordered matrix used by --all-targets
 
 [targets.windows]
-triple = "windows/x86_64-msvc"
+id = "windows/x86_64"
 
 [targets.linux]
-triple = "linux/x86_64-musl"
+id = "linux/x86_64"
 
 [profiles.dev]
 optimization = 0
@@ -112,7 +112,7 @@ as supported and avoids rerunning DOPM until the dependency declaration changes.
 - `obin doctor [manifest]`
 
 Target names are project aliases. `obin build --target linux` resolves
-`targets.linux.triple` and passes the canonical `linux/x86_64-musl` target to
+`targets.linux.id` and passes the canonical `linux/x86_64` target to
 `doletc`. Artifacts are isolated under `build/<target>/<profile>/`, and packages
 are named `<application>-<version>-<target>` so different operating-system
 builds never overwrite each other. A canonical target may also be passed

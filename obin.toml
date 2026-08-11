@@ -11,10 +11,10 @@ incremental = true
 targets = ["windows", "linux"]
 
 [targets.windows]
-triple = "windows/x86_64-msvc"
+id = "windows/x86_64"
 
 [targets.linux]
-triple = "linux/x86_64-musl"
+id = "linux/x86_64"
 
 [profiles.dev]
 optimization = 0

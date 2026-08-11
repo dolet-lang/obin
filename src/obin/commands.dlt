@@ -245,10 +245,10 @@ fun obin_build_one(options: ObinOptions) -> i32:
     optimization: i32 = obin_profile_optimization(document, profile)
     optimization_flag: str = Str.concat(" -O", Convert.i32_to_str(optimization))
     command: str = Str.concat(obin_quote(doletc), Str.concat(" ", Str.concat(obin_quote(entry), Str.concat(" -o ", Str.concat(obin_quote(output), optimization_flag)))))
-    command = Str.concat(command, Str.concat(" --target ", obin_quote(target.triple)))
+    command = Str.concat(command, Str.concat(" --target ", obin_quote(target.id)))
     if obin_profile_no_console(document, project, profile) == 1:
         command = Str.concat(command, " --no-console")
-    print(@"[obin] building {project.name} ({profile}, {target.alias} -> {target.triple})")
+    print(@"[obin] building {project.name} ({profile}, {target.alias} -> {target.id})")
     if options.verbose == 1:
         print(@"       {command}")
     code: i32 = obin_run_in_directory(command, project.root)
@@ -549,7 +549,7 @@ fun obin_doctor(manifest: str) -> i32:
         document: ObinToml = obin_project_document(project)
         selected: ObinTarget = obin_target_from(document, project.target)
         if selected.valid == 1:
-            print(@"  target     : {selected.alias} -> {selected.triple}")
+            print(@"  target     : {selected.alias} -> {selected.id}")
         else:
             print(@"  target     : INVALID ({selected.error})")
     configured_doletc: str = project.doletc
@@ -598,7 +598,7 @@ fun obin_init(directory: str):
     content: str = Str.concat("[application]\nname = \"", name)
     content = Str.concat(content, "\"\nversion = \"0.1.0\"\nentry = \"src/main.dlt\"\ntype = \"console\"\n\n")
     content = Str.concat(content, "[build]\ndefault-target = \"windows\"\ndefault-profile = \"dev\"\nincremental = true\ntargets = [\"windows\", \"linux\"]\n\n")
-    content = Str.concat(content, "[targets.windows]\ntriple = \"windows/x86_64-msvc\"\n\n[targets.linux]\ntriple = \"linux/x86_64-musl\"\n\n")
+    content = Str.concat(content, "[targets.windows]\nid = \"windows/x86_64\"\n\n[targets.linux]\nid = \"linux/x86_64\"\n\n")
     content = Str.concat(content, "[profiles.dev]\noptimization = 0\nno-console = false\n\n[profiles.release]\noptimization = 3\nno-console = false\n\n")
     content = Str.concat(content, "[packages]\nauto-sync = true\n\n[assets]\nroots = [\"assets\"]\ndestination = \"assets\"\n\n")
     content = Str.concat(content, "[package]\ndirectory = \"dist\"\ninclude-assets = true\n")

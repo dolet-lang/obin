@@ -31,7 +31,7 @@ struct ObinProject:
 
 struct ObinTarget:
     alias: str = ""
-    triple: str = ""
+    id: str = ""
     os: str = ""
     artifact_suffix: str = ""
     valid: i32 = 0
@@ -105,18 +105,18 @@ fun obin_target_safe_component(value: str) -> i32:
         return 0
     return 1
 
-fun obin_target_parse_triple(target: ObinTarget) -> ObinTarget:
-    slash: i64 = Str.index_of(target.triple, "/")
-    length: i64 = Memory.strlen(target.triple)
+fun obin_target_parse_id(target: ObinTarget) -> ObinTarget:
+    slash: i64 = Str.index_of(target.id, "/")
+    length: i64 = Memory.strlen(target.id)
     if slash <= 0 or slash >= length - 1:
-        return obin_target_error(target, @"target triple must be os/arch-abi: {target.triple}")
-    target.os = Str.to_lower(Str.substring(target.triple, 0, slash))
-    variant: str = Str.to_lower(Str.substring(target.triple, slash + 1, length))
+        return obin_target_error(target, @"target id must be os/arch: {target.id}")
+    target.os = Str.to_lower(Str.substring(target.id, 0, slash))
+    variant: str = Str.to_lower(Str.substring(target.id, slash + 1, length))
     if Str.contains(variant, "/"):
-        return obin_target_error(target, @"target triple must contain exactly one '/': {target.triple}")
+        return obin_target_error(target, @"target id must contain exactly one '/': {target.id}")
     if obin_target_safe_component(target.os) == 0 or obin_target_safe_component(variant) == 0:
-        return obin_target_error(target, @"target triple contains unsafe components: {target.triple}")
-    target.triple = Str.concat(target.os, Str.concat("/", variant))
+        return obin_target_error(target, @"target id contains unsafe components: {target.id}")
+    target.id = Str.concat(target.os, Str.concat("/", variant))
     return target
 
 fun obin_target_from(document: ObinToml, selected: str) -> ObinTarget:
@@ -125,25 +125,29 @@ fun obin_target_from(document: ObinToml, selected: str) -> ObinTarget:
     if Memory.strlen(selected) == 0:
         return obin_target_error(target, "no build target was selected")
     if Str.contains(selected, "/"):
-        target.triple = Str.to_lower(selected)
-        target = obin_target_parse_triple(target)
+        target.id = Str.to_lower(selected)
+        target = obin_target_parse_id(target)
         if target.valid == 0 and Memory.strlen(target.error) > 0:
             return target
-        variant: str = Str.substring(target.triple, Str.index_of(target.triple, "/") + 1, Memory.strlen(target.triple))
+        variant: str = Str.substring(target.id, Str.index_of(target.id, "/") + 1, Memory.strlen(target.id))
         target.alias = Str.concat(target.os, Str.concat("-", variant))
     else:
         if obin_target_safe_component(selected) == 0:
             return obin_target_error(target, @"invalid target alias: {selected}")
-        key: str = Str.concat("targets.", Str.concat(selected, ".triple"))
-        target.triple = Str.to_lower(obin_toml_get_str(document, key, ""))
-        # Compatibility for manifests created before target tables existed.
-        if Memory.strlen(target.triple) == 0 and Str.equals(Str.to_lower(selected), "windows"):
-            target.triple = "windows/x86_64-msvc"
-        if Memory.strlen(target.triple) == 0 and Str.equals(Str.to_lower(selected), "linux"):
-            target.triple = "linux/x86_64-gnu"
-        if Memory.strlen(target.triple) == 0:
-            return obin_target_error(target, @"target alias '{selected}' has no targets.{selected}.triple")
-        target = obin_target_parse_triple(target)
+        key: str = Str.concat("targets.", Str.concat(selected, ".id"))
+        target.id = Str.to_lower(obin_toml_get_str(document, key, ""))
+        # Read old manifests without leaking backend terminology into the new
+        # schema. New and generated manifests always use targets.<alias>.id.
+        if Memory.strlen(target.id) == 0:
+            legacy_key: str = Str.concat("targets.", Str.concat(selected, ".triple"))
+            target.id = Str.to_lower(obin_toml_get_str(document, legacy_key, ""))
+        if Memory.strlen(target.id) == 0 and Str.equals(Str.to_lower(selected), "windows"):
+            target.id = "windows/x86_64"
+        if Memory.strlen(target.id) == 0 and Str.equals(Str.to_lower(selected), "linux"):
+            target.id = "linux/x86_64"
+        if Memory.strlen(target.id) == 0:
+            return obin_target_error(target, @"target alias '{selected}' has no targets.{selected}.id")
+        target = obin_target_parse_id(target)
         if Memory.strlen(target.error) > 0:
             return target
     if Str.equals(target.os, "windows"):
