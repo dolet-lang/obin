@@ -97,10 +97,13 @@ executable-directory = "bin" # optional
 include = ["LICENSE", "config"] # optional project-relative SDK/runtime files
 ```
 
-Dependency version strings are recorded by Obin, but the current DOPM source
-only exposes `install <name>` and does not resolve versions. Obin therefore does
-not pretend that version resolution exists: it delegates package names exactly
-as supported and avoids rerunning DOPM until the dependency declaration changes.
+Dependency values are passed to DOPM as a source path/URL or Git revision.
+DOPM resolves them to exact commits in `dopm.lock`, installs sources below
+`.dopm/packages`, and Obin passes that project-local root to `doletc`. Every
+build asks DOPM to validate the installed commit and clean Git tree; this uses
+DOPM's local fast path and does not fetch again. Deleted, replaced, or edited
+package directories therefore cannot be hidden by Obin's incremental state.
+Changes to the lock/state invalidate incremental application outputs.
 
 ## Commands
 

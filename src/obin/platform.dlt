@@ -1,25 +1,45 @@
 ##############################
-# Obin platform and filesystem utilities (Windows host).
+# Obin portable host and filesystem utilities.
 ##############################
 
-extern lib "kernel32":
-    fun CreateDirectoryA(lpPathName: str, lpSecurityAttributes: i64) -> i32
-    fun RemoveDirectoryA(lpPathName: str) -> i32
-    fun CopyFileA(lpExistingFileName: str, lpNewFileName: str, bFailIfExists: i32) -> i32
-    fun SetCurrentDirectoryA(lpPathName: str) -> i32
-    fun GetEnvironmentVariableA(lpName: str, lpBuffer: i64, nSize: i32) -> i32
-
 fun obin_quote(value: str) -> str:
-    return Str.concat("\"", Str.concat(value, "\""))
+    if Str.equals(PlatformInfo.name(), "linux"):
+        # POSIX shell: a single quote is represented by closing the quoted
+        # word, emitting a quoted apostrophe, then reopening it.
+        escaped: str = Str.replace(value, "'", "'\"'\"'")
+        return Str.concat("'", Str.concat(escaped, "'"))
+    # Windows CommandLineToArgvW/MSVCRT-compatible escaping. Backslashes only
+    # need doubling before a quote or the closing delimiter.
+    result: str = "\""
+    length: i64 = Memory.strlen(value)
+    index: i64 = 0
+    slashes: i64 = 0
+    count: i64 = 0
+    while index < length:
+        ch: i32 = Memory.read_i8((value as i64) + index) as i32
+        if ch == 92:
+            slashes = slashes + 1
+        else:
+            count = 0
+            if ch == 34:
+                while count < slashes * 2 + 1:
+                    result = Str.concat(result, "\\")
+                    count = count + 1
+            else:
+                while count < slashes:
+                    result = Str.concat(result, "\\")
+                    count = count + 1
+            slashes = 0
+            result = Str.concat(result, Str.substring(value, index, index + 1))
+        index = index + 1
+    count = 0
+    while count < slashes * 2:
+        result = Str.concat(result, "\\")
+        count = count + 1
+    return Str.concat(result, "\"")
 
 fun obin_get_env(name: str) -> str:
-    buffer: i64 = Memory.malloc_zeroed(32768)
-    length: i32 = GetEnvironmentVariableA(name, buffer, 32768)
-    if length <= 0 or length >= 32768:
-        Memory.free(buffer)
-        return ""
-    Memory.write_i8(buffer + (length as i64), 0 as i8)
-    return buffer as str
+    return PlatformHost.get_environment(name)
 
 fun obin_search_path(name: str) -> str:
     path_value: str = obin_get_env("PATH")
@@ -30,7 +50,7 @@ fun obin_search_path(name: str) -> str:
         delimiter: i32 = 0
         if cursor == length:
             delimiter = 1
-        elif Memory.read_i8((path_value as i64) + cursor) == 59:
+        elif Memory.read_i8((path_value as i64) + cursor) == PlatformHost.path_list_separator():
             delimiter = 1
         if delimiter == 1:
             directory: str = Str.trim(Str.substring(path_value, start, cursor))
@@ -48,37 +68,13 @@ fun obin_search_path(name: str) -> str:
     return ""
 
 fun obin_is_directory(path: str) -> i32:
-    attributes: i32 = GetFileAttributesA(path)
-    if attributes == -1:
-        return 0
-    if (attributes & 16) != 0:
-        return 1
-    return 0
+    return PlatformHost.is_directory(path)
 
 fun obin_is_reparse_point(path: str) -> i32:
-    attributes: i32 = GetFileAttributesA(path)
-    if attributes == -1:
-        return 0
-    if (attributes & 1024) != 0:
-        return 1
-    return 0
+    return PlatformHost.is_link(path)
 
 fun obin_file_stamp(path: str) -> i64:
-    find_data: i64 = Memory.malloc_zeroed(320)
-    handle: i64 = FindFirstFileA(path, find_data)
-    if handle == 0 - 1:
-        Memory.free(find_data)
-        return 0
-    low: i64 = Memory.read_i32(find_data + 24) as i64
-    high: i64 = Memory.read_i32(find_data + 28) as i64
-    if low < 0:
-        low = low + 4294967296
-    if high < 0:
-        high = high + 4294967296
-    stamp: i64 = (high << 32) | low
-    FindClose(handle)
-    Memory.free(find_data)
-    return stamp
+    return PlatformHost.file_stamp(path)
 
 fun obin_ensure_directory(path: str) -> i32:
     if Memory.strlen(path) == 0 or obin_is_directory(path) == 1:
@@ -94,11 +90,11 @@ fun obin_ensure_directory(path: str) -> i32:
         if ch == 92 or ch == 47:
             Memory.write_i8((absolute as i64) + cursor, 0 as i8)
             if Memory.strlen(absolute) > 0 and obin_is_directory(absolute) == 0:
-                CreateDirectoryA(absolute, 0)
+                PlatformHost.create_directory(absolute)
             Memory.write_i8((absolute as i64) + cursor, ch)
         cursor = cursor + 1
     if obin_is_directory(absolute) == 0:
-        CreateDirectoryA(absolute, 0)
+        PlatformHost.create_directory(absolute)
     result: i32 = obin_is_directory(absolute)
     Memory.free(absolute as i64)
     return result
@@ -158,8 +154,11 @@ fun obin_collect_files(directory: str, extension: str, files: list<str>, depth: 
 fun obin_path_is_inside(path: str, root: str) -> i32:
     absolute_path: str = PathOps.normalize(PathOps.resolve_path(path))
     absolute_root: str = PathOps.normalize(PathOps.resolve_path(root))
-    path_lower: str = Str.to_lower(absolute_path)
-    root_lower: str = Str.to_lower(absolute_root)
+    path_lower: str = absolute_path
+    root_lower: str = absolute_root
+    if PlatformHost.paths_are_case_sensitive() == false:
+        path_lower = Str.to_lower(absolute_path)
+        root_lower = Str.to_lower(absolute_root)
     root_length: i64 = Memory.strlen(root_lower)
     while root_length > 3:
         last: i32 = Memory.read_i8((root_lower as i64) + root_length - 1) as i32
@@ -181,10 +180,10 @@ fun obin_remove_tree(path: str) -> i32:
     if PathOps.exists(path) == 0:
         return 1
     if obin_is_directory(path) == 0:
-        return DeleteFileA(path)
+        return PlatformHost.remove_file(path)
     # Never follow a junction/symlink while deleting a project tree.
     if obin_is_reparse_point(path) == 1:
-        return RemoveDirectoryA(path)
+        return PlatformHost.remove_link(path)
     names: list<str> = Dir.list(path)
     index: i64 = 0
     while index < names.size():
@@ -192,7 +191,7 @@ fun obin_remove_tree(path: str) -> i32:
         if obin_remove_tree(child) == 0:
             return 0
         index = index + 1
-    return RemoveDirectoryA(path)
+    return PlatformHost.remove_directory(path)
 
 fun obin_copy_tree(source: str, destination: str) -> i32:
     if PathOps.exists(source) == 0:
@@ -201,7 +200,7 @@ fun obin_copy_tree(source: str, destination: str) -> i32:
         directory: str = PathOps.get_directory(destination)
         if obin_ensure_directory(directory) == 0:
             return 0
-        return CopyFileA(source, destination, 0)
+        return PlatformHost.copy_file(source, destination)
     if obin_is_reparse_point(source) == 1:
         return 0
     if obin_ensure_directory(destination) == 0:
@@ -219,10 +218,10 @@ fun obin_copy_tree(source: str, destination: str) -> i32:
 fun obin_run_in_directory(command: str, directory: str) -> i32:
     original: str = PathOps.get_cwd()
     if Memory.strlen(directory) > 0:
-        if SetCurrentDirectoryA(directory) == 0:
+        if PlatformHost.change_directory(directory) == 0:
             return -1
     code: i32 = Process.run(command)
-    SetCurrentDirectoryA(original)
+    PlatformHost.change_directory(original)
     return code
 
 fun obin_resolve_from(base: str, path: str) -> str:
@@ -233,6 +232,7 @@ fun obin_resolve_from(base: str, path: str) -> str:
     return PathOps.resolve_path(PathOps.join_path(base, path))
 
 fun obin_find_doletc(configured: str) -> str:
+    compiler_name: str = Str.concat("doletc", PlatformHost.executable_suffix())
     if Memory.strlen(configured) > 0:
         resolved: str = PathOps.resolve_path(configured)
         if PathOps.exists(resolved):
@@ -247,17 +247,21 @@ fun obin_find_doletc(configured: str) -> str:
         return PathOps.resolve_path(environment)
     home: str = obin_get_env("DOLET_HOME")
     if Memory.strlen(home) > 0:
-        home_compiler: str = obin_resolve_from(home, "bin\\doletc.exe")
+        home_compiler: str = obin_resolve_from(PathOps.join_path(home, "bin"), compiler_name)
         if PathOps.exists(home_compiler):
             return home_compiler
     executable_directory: str = PathOps.get_exe_directory()
-    beside: str = obin_resolve_from(executable_directory, "doletc.exe")
+    beside: str = obin_resolve_from(executable_directory, compiler_name)
     if PathOps.exists(beside):
         return beside
-    development: str = obin_resolve_from(executable_directory, "..\\..\\dolet-compiler\\bin\\doletc.exe")
+    development_root: str = PathOps.join_path(executable_directory, "..")
+    development_root = PathOps.join_path(development_root, "..")
+    development_root = PathOps.join_path(development_root, "dolet-compiler")
+    development_root = PathOps.join_path(development_root, "bin")
+    development: str = obin_resolve_from(development_root, compiler_name)
     if PathOps.exists(development):
         return development
-    path_compiler: str = obin_search_path("doletc.exe")
+    path_compiler: str = obin_search_path(compiler_name)
     if Memory.strlen(path_compiler) > 0:
         return path_compiler
     return ""
@@ -276,7 +280,8 @@ fun obin_find_dopm(configured: str) -> str:
     if Memory.strlen(environment) > 0 and PathOps.exists(environment) == 1:
         return PathOps.resolve_path(environment)
     executable_directory: str = PathOps.get_exe_directory()
-    names: list<str> = ["dopm.exe", "do.exe"]
+    suffix: str = PlatformHost.executable_suffix()
+    names: list<str> = [Str.concat("dopm", suffix), Str.concat("do", suffix)]
     index: i64 = 0
     while index < names.size():
         beside: str = obin_resolve_from(executable_directory, names.get_str(index))
@@ -294,14 +299,15 @@ fun obin_find_frog_cooker(configured: str, doletc: str) -> str:
         if PathOps.exists(resolved):
             return resolved
     executable_directory: str = PathOps.get_exe_directory()
-    beside: str = obin_resolve_from(executable_directory, "frog-cooker.exe")
+    cooker_name: str = Str.concat("frog-cooker", PlatformHost.executable_suffix())
+    beside: str = obin_resolve_from(executable_directory, cooker_name)
     if PathOps.exists(beside):
         return beside
     compiler_directory: str = PathOps.get_directory(doletc)
-    compiler_beside: str = obin_resolve_from(compiler_directory, "frog-cooker.exe")
+    compiler_beside: str = obin_resolve_from(compiler_directory, cooker_name)
     if PathOps.exists(compiler_beside):
         return compiler_beside
-    on_path: str = obin_search_path("frog-cooker.exe")
+    on_path: str = obin_search_path(cooker_name)
     if Memory.strlen(on_path) > 0:
         return on_path
     return ""

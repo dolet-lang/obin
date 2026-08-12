@@ -170,9 +170,9 @@ fun obin_frog_cooker_dependency_newer(source: str, cooker: str) -> i32:
 fun obin_frog_find_cooker_source(doletc: str) -> str:
     compiler_directory: str = PathOps.get_directory(doletc)
     candidates: list<str> = []
-    candidates.append(obin_resolve_from(compiler_directory, "..\\packages\\frog\\tools\\frog_cooker.dlt"))
-    candidates.append(obin_resolve_from(PathOps.get_exe_directory(), "..\\packages\\frog\\tools\\frog_cooker.dlt"))
-    candidates.append(obin_resolve_from(PathOps.get_exe_directory(), "..\\..\\dolet-compiler\\packages\\frog\\tools\\frog_cooker.dlt"))
+    candidates.append(obin_resolve_from(compiler_directory, PathOps.join_path("..", PathOps.join_path("packages", PathOps.join_path("frog", PathOps.join_path("tools", "frog_cooker.dlt"))))))
+    candidates.append(obin_resolve_from(PathOps.get_exe_directory(), PathOps.join_path("..", PathOps.join_path("packages", PathOps.join_path("frog", PathOps.join_path("tools", "frog_cooker.dlt"))))))
+    candidates.append(obin_resolve_from(PathOps.get_exe_directory(), PathOps.join_path("..", PathOps.join_path("..", PathOps.join_path("dolet-compiler", PathOps.join_path("packages", PathOps.join_path("frog", PathOps.join_path("tools", "frog_cooker.dlt"))))))))
     index: i64 = 0
     while index < candidates.size():
         if PathOps.exists(candidates.get_str(index)) == 1:
@@ -186,12 +186,12 @@ fun obin_frog_ensure_cooker(project: ObinProject, doletc: str) -> str:
         if PathOps.exists(configured) == 1:
             return configured
         return ""
-    tools_directory: str = obin_resolve_from(project.root, ".obin\\tools")
+    tools_directory: str = obin_resolve_from(PathOps.join_path(project.root, ".obin"), "tools")
     if obin_ensure_directory(tools_directory) == 0:
         return ""
     cooker_name: str = "frog-cooker"
     if Str.equals(PlatformInfo.name(), "windows"):
-        cooker_name = "frog-cooker.exe"
+        cooker_name = Str.concat("frog-cooker", PlatformHost.executable_suffix())
     cooker: str = PathOps.join_path(tools_directory, cooker_name)
     source: str = obin_frog_find_cooker_source(doletc)
     if Memory.strlen(source) == 0:
@@ -302,7 +302,7 @@ fun obin_frog_discover_models(project: ObinProject, document: ObinToml) -> list<
     source_root: str = PathOps.get_directory(entry)
     obin_collect_files(source_root, ".dlt", files, 0)
     obin_frog_add_root(roots, project, "assets")
-    obin_frog_add_root(roots, project, "src\\assets")
+    obin_frog_add_root(roots, project, PathOps.join_path("src", "assets"))
     configured_roots: list<str> = obin_toml_array(document, "assets.roots")
     root_index: i64 = 0
     while root_index < configured_roots.size():

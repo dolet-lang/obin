@@ -1,0 +1,8 @@
+import image
+
+color: i32 = image_rgba(12, 34, 56, 255)
+if image_red(color) != 12 or image_green(color) != 34 or image_blue(color) != 56 or image_alpha(color) != 255:
+    print("dependency smoke failed")
+    Process.exit(1)
+
+print("dependency smoke passed")

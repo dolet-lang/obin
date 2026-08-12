@@ -132,11 +132,11 @@ fun obin_sync_dependencies(project: ObinProject, document: ObinToml, force: i32)
     if dependencies.size() == 0 or project.auto_sync == 0:
         return 0
     signature: str = obin_dependency_signature(document)
-    state: str = obin_resolve_from(project.root, ".obin\\dependencies.state")
-    if force == 0:
-        if PathOps.exists(state) == 1:
-            if Str.equals(obin_read_text(state), signature):
-                return 0
+    state: str = obin_resolve_from(PathOps.join_path(project.root, ".obin"), "dependencies.state")
+    # Do not trust the signature cache by itself. Packages can be deleted,
+    # replaced, or edited while the manifest remains unchanged. DOPM's fast
+    # installed-package path verifies both the locked commit and a clean Git
+    # tree, preserving reproducible builds without fetching again.
     configured_dopm: str = project.dopm
     if Memory.strlen(configured_dopm) > 0:
         project_dopm: str = obin_resolve_from(project.root, configured_dopm)
@@ -152,6 +152,13 @@ fun obin_sync_dependencies(project: ObinProject, document: ObinToml, force: i32)
     while index < dependencies.size():
         name: str = dependencies.get_str(index)
         command: str = Str.concat(obin_quote(dopm), Str.concat(" install ", obin_quote(name)))
+        requested: str = Str.trim(obin_toml_get_raw(document, Str.concat("dependencies.", name), "*"))
+        if Memory.strlen(requested) > 0 and Str.equals(requested, "*") == false:
+            # Preserve exact manifest intent. DOPM accepts a source path/URL
+            # or a Git revision and writes the resolved commit to dopm.lock.
+            if Str.starts_with(requested, "\"") and Str.ends_with(requested, "\""):
+                requested = Str.substring(requested, 1, Memory.strlen(requested) - 1)
+            command = Str.concat(command, Str.concat(" ", obin_quote(requested)))
         if obin_run_in_directory(command, project.root) != 0:
             print(@"obin: DOPM failed while installing {name}")
             return 1
@@ -181,6 +188,10 @@ fun obin_sources_newer(project: ObinProject, output: str, doletc: str) -> i32:
         return 1
     stamp: i64 = obin_file_stamp(output)
     if obin_file_stamp(project.manifest) > stamp or obin_file_stamp(doletc) > stamp:
+        return 1
+    lock_path: str = PathOps.join_path(project.root, "dopm.lock")
+    dependency_state: str = obin_resolve_from(PathOps.join_path(project.root, ".obin"), "dependencies.state")
+    if obin_file_stamp(lock_path) > stamp or obin_file_stamp(dependency_state) > stamp:
         return 1
     files: list<str> = []
     source_root: str = PathOps.get_directory(obin_project_entry(project))
@@ -246,6 +257,8 @@ fun obin_build_one(options: ObinOptions) -> i32:
     optimization_flag: str = Str.concat(" -O", Convert.i32_to_str(optimization))
     command: str = Str.concat(obin_quote(doletc), Str.concat(" ", Str.concat(obin_quote(entry), Str.concat(" -o ", Str.concat(obin_quote(output), optimization_flag)))))
     command = Str.concat(command, Str.concat(" --target ", obin_quote(target.id)))
+    package_root: str = obin_resolve_from(PathOps.join_path(project.root, ".dopm"), "packages")
+    command = Str.concat(command, Str.concat(" --package-path ", obin_quote(package_root)))
     if obin_profile_no_console(document, project, profile) == 1:
         command = Str.concat(command, " --no-console")
     print(@"[obin] building {project.name} ({profile}, {target.alias} -> {target.id})")
@@ -332,7 +345,7 @@ fun obin_copy_packaged_assets_tree(source: str, destination: str, strip_cooked_s
         directory: str = PathOps.get_directory(destination)
         if obin_ensure_directory(directory) == 0:
             return 0
-        return CopyFileA(source, destination, 0)
+        return PlatformHost.copy_file(source, destination)
     if obin_is_reparse_point(source) == 1:
         return 0
     if obin_ensure_directory(destination) == 0:
@@ -389,7 +402,7 @@ fun obin_copy_package_tree(source: str, destination: str) -> i32:
         directory: str = PathOps.get_directory(destination)
         if obin_ensure_directory(directory) == 0:
             return 0
-        return CopyFileA(source, destination, 0)
+        return PlatformHost.copy_file(source, destination)
     if obin_is_reparse_point(source) == 1:
         return 0
     if obin_ensure_directory(destination) == 0:
@@ -518,7 +531,7 @@ fun obin_clean(manifest: str) -> i32:
     targets: list<str> = []
     targets.append(obin_resolve_from(project.root, "build"))
     targets.append(obin_resolve_from(project.root, project.package_directory))
-    targets.append(obin_resolve_from(project.root, ".obin\\dependencies.state"))
+    targets.append(obin_resolve_from(PathOps.join_path(project.root, ".obin"), "dependencies.state"))
     index: i64 = 0
     while index < targets.size():
         target: str = targets.get_str(index)
@@ -604,7 +617,7 @@ fun obin_init(directory: str):
     content = Str.concat(content, "[package]\ndirectory = \"dist\"\ninclude-assets = true\n")
     if obin_write_text(manifest, content) == 0:
         obin_fail("could not write obin.toml")
-    entry: str = PathOps.join_path(root, "src\\main.dlt")
+    entry: str = PathOps.join_path(PathOps.join_path(root, "src"), "main.dlt")
     if PathOps.exists(entry) == 0:
         if obin_write_text(entry, "print(\"Hello from Dolet!\")\n") == 0:
             obin_fail("could not write src/main.dlt")

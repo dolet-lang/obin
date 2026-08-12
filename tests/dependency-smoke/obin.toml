@@ -1,0 +1,27 @@
+[application]
+name = "dependency-smoke"
+version = "0.1.0"
+entry = "src/main.dlt"
+type = "console"
+
+[build]
+default-target = "windows"
+default-profile = "release"
+incremental = true
+
+[targets.windows]
+id = "windows/x86_64"
+
+[profiles.release]
+optimization = 3
+no-console = false
+
+[dependencies]
+image = "../../../dolet-compiler/packages/image"
+
+[packages]
+auto-sync = true
+
+[package]
+directory = "dist"
+include-assets = false

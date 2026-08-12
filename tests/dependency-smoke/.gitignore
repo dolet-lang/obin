@@ -1,0 +1,5 @@
+/.dopm/
+/.obin/
+/build/
+/dist/
+/dopm.lock
