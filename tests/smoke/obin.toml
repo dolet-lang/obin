@@ -8,13 +8,14 @@ type = "console"
 default-target = "windows"
 default-profile = "dev"
 incremental = true
-targets = ["windows", "linux"]
 
 [targets.windows]
 id = "windows/x86_64"
+package-require = ["smoke.exe"]
 
 [targets.linux]
 id = "linux/x86_64"
+package-require = ["smoke"]
 
 [profiles.dev]
 optimization = 0
@@ -34,3 +35,4 @@ destination = "assets"
 [package]
 directory = "dist"
 include-assets = true
+require = ["assets"]

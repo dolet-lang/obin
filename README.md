@@ -38,13 +38,14 @@ type = "game" # console, gui, or game
 default-target = "windows"
 default-profile = "dev"
 incremental = true
-targets = ["windows", "linux"] # ordered matrix used by --all-targets
 
 [targets.windows]
 id = "windows/x86_64"
+package-require = ["bin/my-game.exe"]
 
 [targets.linux]
 id = "linux/x86_64"
+package-require = ["bin/my-game"]
 
 [profiles.dev]
 optimization = 0
@@ -95,6 +96,7 @@ directory = "dist"
 include-assets = true
 executable-directory = "bin" # optional
 include = ["LICENSE", "config"] # optional project-relative SDK/runtime files
+require = ["LICENSE"] # optional final-package contract
 ```
 
 Dependency values are passed to DOPM as a source path/URL or Git revision.
@@ -108,9 +110,9 @@ Changes to the lock/state invalidate incremental application outputs.
 ## Commands
 
 - `obin init [directory]`
-- `obin build [manifest] [--profile name] [--target name | --all-targets] [--out path]`
+- `obin build [manifest] [--profile name] [--target name] [--out path]`
 - `obin run [manifest] [build options] [-- application arguments]`
-- `obin package [manifest] [--target name | --all-targets]` (uses the `release` profile by default)
+- `obin package [manifest] [--target name]` (uses the `release` profile by default)
 - `obin clean [manifest]`
 - `obin doctor [manifest]`
 
@@ -121,11 +123,9 @@ are named `<application>-<version>-<target>` so different operating-system
 builds never overwrite each other. A canonical target may also be passed
 directly to `--target`.
 
-`--all-targets` builds the aliases in `build.targets` sequentially and stops on
-the first failure. Sequential execution is intentional: compiler and asset
-toolchains can be memory-heavy, and deterministic logs are more useful than
-oversubscribing the host. `--target`, `--out`, and `--all-targets` cannot be
-combined.
+Select each output explicitly with `--target windows` or `--target linux`.
+Explicit targets keep platform-specific SDK preparation, packaging, and logs
+independent and prevent an accidental build for an unprepared platform.
 
 `package.include` stages project-relative files or trees at the same relative
 path. VCS metadata, hidden cache directories, `.obin`, and `node_modules` are
@@ -133,6 +133,12 @@ excluded, and includes are forbidden from escaping either the project or the
 package stage. A target may add files with
 `targets.<alias>.package-include`. `package.executable-directory` places the
 program under a subdirectory such as `bin/`, which is useful for SDK layouts.
+`package.require` and `targets.<alias>.package-require` declare paths that must
+exist in the final staged bundle. Obin validates them after `after-package`
+hooks and refuses to report success for an incomplete package. Package copying
+also rejects host-local symbolic links and reparse points so a distributable
+cannot accidentally depend on paths from the build machine; a thin SDK should
+ship a target-native setup script which creates any required local links.
 
 `clean` is restricted to paths inside the project root. The Frog adapter builds
 the pure-Dolet cooker into `.obin/tools`, discovers referenced `.gltf`, `.glb`,

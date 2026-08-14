@@ -211,12 +211,6 @@ fun obin_load_project(manifest_hint: str) -> ObinProject:
 fun obin_project_document(project: ObinProject) -> ObinToml:
     return obin_toml_parse_file(project.manifest)
 
-fun obin_project_targets(document: ObinToml) -> list<str>:
-    # A matrix is explicit so its order is stable and auxiliary target keys do
-    # not accidentally become build entries. Single-target projects do not
-    # need this key; it is only required by --all-targets.
-    return obin_toml_array(document, "build.targets")
-
 fun obin_profile_optimization(document: ObinToml, profile: str) -> i32:
     key: str = Str.concat("profiles.", Str.concat(profile, ".optimization"))
     fallback: i32 = 0
