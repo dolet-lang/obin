@@ -179,6 +179,55 @@ fun obin_run_hooks(project: ObinProject, document: ObinToml, name: str, verbose:
         index = index + 1
     return 0
 
+# Directories obin writes into. Skipped when scanning for sources so the walk
+# never compares the build against itself.
+fun obin_is_output_directory(project: ObinProject, name: str) -> i32:
+    lower: str = Str.to_lower(name)
+    if Str.equals(lower, "build"):
+        return 1
+    if Memory.strlen(project.package_directory) > 0:
+        if Str.equals(lower, Str.to_lower(project.package_directory)):
+            return 1
+    return 0
+
+# Every .dlt in the project, not only the ones beside the entry point. A helper
+# at the project root or a module in lib/ is just as much a source.
+fun obin_project_sources_newer(project: ObinProject, stamp: i64) -> i32:
+    names: list<str> = Dir.list(project.root)
+    index: i64 = 0
+    while index < names.size():
+        name: str = names.get_str(index)
+        path: str = PathOps.join_path(project.root, name)
+        if obin_is_directory(path) == 1:
+            if obin_skip_directory(name) == 0 and obin_is_output_directory(project, name) == 0:
+                if obin_tree_newer(path, stamp, 1) == 1:
+                    return 1
+        else:
+            if Str.ends_with(Str.to_lower(name), ".dlt"):
+                if obin_file_stamp(path) > stamp:
+                    return 1
+        index = index + 1
+    return 0
+
+# Packages compile from source on every build, so editing one changes the
+# executable even though nothing in the project did. Two roots can supply them:
+# the project-local .dopm tree, and the toolchain's own packages and library
+# beside doletc. Neither was stamped, which is why editing an engine package
+# left obin: could not find obin.toml or dolet.toml launching a stale binary until someone ran a clean by hand.
+fun obin_dependency_sources_newer(project: ObinProject, doletc: str, stamp: i64) -> i32:
+    local_packages: str = obin_resolve_from(PathOps.join_path(project.root, ".dopm"), "packages")
+    if obin_tree_newer(local_packages, stamp, 0) == 1:
+        return 1
+    # get_directory keeps the trailing separator, so calling it twice returns the
+    # same folder rather than climbing. Step up explicitly instead â€” doletc itself
+    # addresses its own tree the same way (bin/../library).
+    toolchain: str = PathOps.join_path(PathOps.get_directory(doletc), "..")
+    if obin_tree_newer(PathOps.join_path(toolchain, "packages"), stamp, 0) == 1:
+        return 1
+    if obin_tree_newer(PathOps.join_path(toolchain, "library"), stamp, 0) == 1:
+        return 1
+    return 0
+
 fun obin_sources_newer(project: ObinProject, output: str, doletc: str) -> i32:
     if PathOps.exists(output) == 0:
         return 1
@@ -189,14 +238,10 @@ fun obin_sources_newer(project: ObinProject, output: str, doletc: str) -> i32:
     dependency_state: str = obin_resolve_from(PathOps.join_path(project.root, ".obin"), "dependencies.state")
     if obin_file_stamp(lock_path) > stamp or obin_file_stamp(dependency_state) > stamp:
         return 1
-    files: list<str> = []
-    source_root: str = PathOps.get_directory(obin_project_entry(project))
-    obin_collect_files(source_root, ".dlt", files, 0)
-    index: i64 = 0
-    while index < files.size():
-        if obin_file_stamp(files.get_str(index)) > stamp:
-            return 1
-        index = index + 1
+    if obin_project_sources_newer(project, stamp) == 1:
+        return 1
+    if obin_dependency_sources_newer(project, doletc, stamp) == 1:
+        return 1
     return 0
 
 fun obin_build_one(options: ObinOptions) -> i32:
